@@ -236,8 +236,9 @@ class TfTrtIntegrationTestBase(test_util.TensorFlowTestCase):
       else:
         mask = np.zeros(len(input_shapes[i]))
       if use_implicit_batch:
-        mask[0] = 1
+        mask[0] = 0
       shape = [s if m else None for s, m in zip(input_shapes[i], mask)]
+      logging.info("Adding input shape %s", shape)
       input_specs.append(tensor_spec.TensorSpec(shape, dtype, "input_%d" % i))
 
     for i, shape in enumerate(output_shapes):
@@ -245,6 +246,7 @@ class TfTrtIntegrationTestBase(test_util.TensorFlowTestCase):
           out_shape=[None] + shape[1:]
       else:
           out_shape = shape
+      logging.info("Adding output shape %s", shape)
       output_specs.append(tensor_spec.TensorSpec(out_shape, dtype,
                                                  "output_%d" % i))
 
