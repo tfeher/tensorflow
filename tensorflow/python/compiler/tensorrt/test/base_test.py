@@ -25,13 +25,16 @@ from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import gen_math_ops
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import nn
 from tensorflow.python.ops import nn_ops
 from tensorflow.python.platform import test
+from tensorflow.python.platform import tf_logging as logging
 
 
-class SimpleSingleEngineTest(trt_test.TfTrtIntegrationTestBase):
+
+# class SimpleSingleEngineTest(trt_test.TfTrtIntegrationTestBase):
 
   def GraphFn(self, inp):
     """Create a graph containing single segment."""
@@ -290,6 +293,23 @@ class ControlDependencyTest(trt_test.TfTrtIntegrationTestBase):
         "TRTEngineOp_0": ["c1", "add", "add1", "mul"],
         "TRTEngineOp_1": ["c2", "add2", "add3", "mul1"]
     }
+
+class ExplicitBatchDimTest(trt_test.TfTrtIntegrationTestBase):
+
+  def GraphFn(self, inp):
+    """Create a graph containing single segment."""
+    dtype = inp.dtype
+    val = math_ops.abs(inp)
+    return gen_math_ops.exp(val)
+
+  def GetParams(self):
+    return self.BuildParams(self.GraphFn, dtypes.float32, [[100, 6, 6, 6]],
+                            [[100, 6, 6, 6]], use_implicit_batch=True,
+                            known_shape_masks=None) #[[0,1,1,1]])
+
+  def ExpectedEnginesToBuild(self, run_params):
+    """Return the expected engines to build."""
+    return ["TRTEngineOp_0"]
 
 
 if __name__ == "__main__":

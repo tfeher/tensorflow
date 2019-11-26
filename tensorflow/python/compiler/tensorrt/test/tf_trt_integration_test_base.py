@@ -69,7 +69,9 @@ TfTrtIntegrationTestParams = namedtuple(
         "input_dims",
         # A list of list of expected output shapes. Each shape must match the
         # corresponding element in `output_specs`.
-        "expected_output_dims"
+        "expected_output_dims",
+        # A parameter for custom rewriter config
+        "use_implicit_batch"
     ])
 
 RunParams = namedtuple(
@@ -133,6 +135,29 @@ def OptimizerDisabledRewriterConfig():
       rewriter_config_pb2.RewriterConfig.ONE)
   return rewriter_config
 
+def getTensorrtRewriterConfigTemplate(run_params, use_implicit_batch=True):
+  """Test case for TrtGraphConverter.get_tensorrt_rewriter_config()."""
+  if not is_tensorrt_enabled():
+    return
+
+  rewriter_config = rewriter_config_pb2.RewriterConfig()
+  rewriter_config.optimizers.extend(["constfold", "layout", "constfold"])
+  rewriter_config.meta_optimizer_iterations = (
+      rewriter_config_pb2.RewriterConfig.ONE)
+  optimizer = rewriter_config.custom_optimizers.add()
+  rewriter_config.custom_optimizers.add().name = "constfold"
+  optimizer.name = "TensorRTOptimizer"
+  optimizer.parameter_map["minimum_segment_size"].i = 1
+  optimizer.parameter_map["max_batch_size"].i = 128  # trt_convert.DEFAULT_TRT_CONVERSION_PARAMS.max_batch_size
+  optimizer.parameter_map["is_dynamic_op"].b = run_params.dynamic_engine
+  optimizer.parameter_map["max_workspace_size_bytes"].i = 1 << 25
+  optimizer.parameter_map["precision_mode"].s = trt_convert._to_bytes(
+      run_params.precision_mode)
+  optimizer.parameter_map["maximum_cached_engines"].i = 1
+  optimizer.parameter_map["use_calibration"].b = run_params.use_calibration
+  optimizer.parameter_map["use_implicit_batch"].b = use_implicit_batch
+  logging.info('Rewriter_config_template created')
+  return rewriter_config
 
 class TfTrtIntegrationTestBase(test_util.TensorFlowTestCase):
   """Class to test Tensorflow-TensorRT integration."""
@@ -185,7 +210,8 @@ class TfTrtIntegrationTestBase(test_util.TensorFlowTestCase):
     super(TfTrtIntegrationTestBase, self).setUp()
     warnings.simplefilter("always")
 
-  def BuildParams(self, graph_fn, dtype, input_shapes, output_shapes):
+  def BuildParams(self, graph_fn, dtype, input_shapes, output_shapes,
+                  use_implicit_batch=True, known_shape_masks=None):
     """Build test parameters when not considering dynamic shapes."""
 
     def _Validate(shapes):
@@ -196,20 +222,40 @@ class TfTrtIntegrationTestBase(test_util.TensorFlowTestCase):
     _Validate(input_shapes)
     _Validate(output_shapes)
 
+    if known_shape_masks is None:
+      known_shape_masks =  [None]*len(input_shapes)
+    else:
+      use_implicit_batch = True
+
+    input_specs = list()
+    output_specs = list()
+
+    for i, mask in enumerate(known_shape_masks):
+      if mask is not None:
+        assert(len(mask)==len(input_shapes[i]))
+      else:
+        mask = np.zeros(len(input_shapes[i]))
+      if use_implicit_batch:
+        mask[0] = 1
+      shape = [s if m else None for s, m in zip(input_shapes[i], mask)]
+      input_specs.append(tensor_spec.TensorSpec(shape, dtype, "input_%d" % i))
+
+    for i, shape in enumerate(output_shapes):
+      if use_implicit_batch:
+          out_shape=[None] + shape[1:]
+      else:
+          out_shape = shape
+      output_specs.append(tensor_spec.TensorSpec(out_shape, dtype,
+                                                 "output_%d" % i))
+
     return TfTrtIntegrationTestParams(
         graph_fn=graph_fn,
-        # Unset the batch dim of the specs to make sure TRT can tolerate changes
-        # on that.
-        input_specs=[
-            tensor_spec.TensorSpec([None] + shape[1:], dtype, "input_%d" % i)
-            for i, shape in enumerate(input_shapes)
-        ],
-        output_specs=[
-            tensor_spec.TensorSpec([None] + shape[1:], dtype, "output_%d" % i)
-            for i, shape in enumerate(output_shapes)
-        ],
+        input_specs=input_specs,
+        output_specs=output_specs,
         input_dims=[input_shapes],
-        expected_output_dims=[output_shapes])
+        expected_output_dims=[output_shapes],
+        use_implicit_batch=use_implicit_batch
+    )
 
   def GetParams(self):
     """Return a TfTrtIntegrationTestParams for test, implemented by subclass."""
@@ -224,11 +270,27 @@ class TfTrtIntegrationTestBase(test_util.TensorFlowTestCase):
       input_batches = [dims[0] for dims in dims_list]
       assert max(input_batches) == min(input_batches)
       batch_list.append(input_batches[0])
-    conversion_params = trt_convert.TrtConversionParams(
+
+    if not self._GetParamsCached().use_implicit_batch:
+        rewriter_conf_template = getTensorrtRewriterConfigTemplate(
+            run_params, self._GetParamsCached().use_implicit_batch)
+        conversion_params = trt_convert.TrtConversionParams(
+            rewriter_config_template=rewriter_conf_template,
+            # Note: rewriter config template will override these params:
+            max_workspace_size_bytes=1 << 25,
+            precision_mode=run_params.precision_mode,
+            minimum_segment_size=1,
+            is_dynamic_op=run_params.dynamic_engine,
+            maximum_cached_engines=1,
+            use_calibration=run_params.use_calibration,
+            max_batch_size=min(batch_list))
+    else:
+        rewriter_conf_template = None
+        conversion_params = trt_convert.TrtConversionParams(
         # We use the minimum of all the batch sizes, so when multiple different
         # input shapes are provided it'll always create new engines in the
         # cache, and we can therefore test the cache behavior.
-        rewriter_config_template=None,
+        rewriter_config_template=rewriter_conf_template,
         max_workspace_size_bytes=1 << 25,
         precision_mode=run_params.precision_mode,
         minimum_segment_size=2,
