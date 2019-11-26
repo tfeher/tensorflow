@@ -637,8 +637,21 @@ bool TRTEngineOp::ExecuteTrtEngine(OpKernelContext* ctx,
   // for it.
   mutex_lock lock(engine_context->mu);
   // TODO(jie): trt enqueue does not return error
-  auto ret = engine_context->execution_context->enqueue(num_batch, &buffers[0],
-                                                        *stream, nullptr);
+  bool ret = false;
+  bool run_v1 = use_implicit_batch_;
+
+#if IS_TRT_VERSION_GE(6, 0, 0, 0)
+  if (!use_implicit_batch_) {
+    ret = engine_context->execution_context->enqueueV2(&buffers[0], *stream,
+                                                       nullptr);
+  }
+#else
+  run_v1 = true;
+#endif
+  if (run_v1) {
+    ret = engine_context->execution_context->enqueue(num_batch, &buffers[0],
+                                                     *stream, nullptr);
+  }
   if (!ret) {
     LOG(WARNING) << "Failed to enqueue batch for TRT engine: " << name();
     return kRetry;
