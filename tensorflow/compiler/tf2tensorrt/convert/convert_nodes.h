@@ -23,6 +23,7 @@ limitations under the License.
 #include <vector>
 
 #include "tensorflow/compiler/tf2tensorrt/convert/utils.h"
+#include "tensorflow/compiler/tf2tensorrt/utils/trt_shape_optimization_profiles.h"
 #include "tensorflow/compiler/tf2tensorrt/utils/trt_allocator.h"
 #include "tensorflow/compiler/tf2tensorrt/utils/trt_int8_calibrator.h"
 #include "tensorflow/compiler/tf2tensorrt/utils/trt_logger.h"
@@ -41,14 +42,6 @@ namespace tensorrt {
 
 namespace convert {
 using ::stream_executor::port::StatusOr;
-
-#define IS_TRT_VERSION_GE(major, minor, patch, build)           \
-  ((NV_TENSORRT_MAJOR > major) ||                               \
-   (NV_TENSORRT_MAJOR == major && NV_TENSORRT_MINOR > minor) || \
-   (NV_TENSORRT_MAJOR == major && NV_TENSORRT_MINOR == minor && \
-    NV_TENSORRT_PATCH > patch) ||                               \
-   (NV_TENSORRT_MAJOR == major && NV_TENSORRT_MINOR == minor && \
-    NV_TENSORRT_PATCH == patch && NV_TENSORRT_BUILD >= build))
 
 struct EngineConnection {
   // Constructs a non-control edge.
@@ -153,7 +146,8 @@ Status ConvertGraphDefToEngine(
     nvinfer1::ILogger* logger, nvinfer1::IGpuAllocator* allocator,
     TRTInt8Calibrator* calibrator,
     TrtUniquePtrType<nvinfer1::ICudaEngine>* engine, bool use_calibration,
-    const bool use_implicit_batch, bool* convert_successfully);
+    const bool use_implicit_batch, bool* convert_successfully,
+    TrtShapeOptimizationProfile& profiles);
 
 // Helper class for the segmenter to determine whether an output edge from the
 // TRT segment is valid.
@@ -474,7 +468,8 @@ class Converter {
   Status BuildCudaEngine(TrtUniquePtrType<nvinfer1::ICudaEngine>* engine,
                          int max_batch_size, size_t max_workspace_size_bytes,
                          nvinfer1::IGpuAllocator* allocator,
-                         TRTInt8Calibrator* calibrator);
+                         TRTInt8Calibrator* calibrator,
+                         TrtShapeOptimizationProfile& profiles);
 
   //////////////////////////////////////////////////////////////////////////////
   // Methods used by op converters to convert individual TF node and add layers

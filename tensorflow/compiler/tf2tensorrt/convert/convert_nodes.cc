@@ -30,6 +30,7 @@ limitations under the License.
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "tensorflow/compiler/tf2tensorrt/convert/utils.h"
+#include "tensorflow/compiler/tf2tensorrt/utils/trt_shape_optimization_profiles.h"
 #include "tensorflow/compiler/tf2tensorrt/utils/trt_logger.h"
 #include "tensorflow/core/framework/node_def.pb.h"  // NOLINT
 #include "tensorflow/core/framework/node_def_builder.h"
@@ -198,18 +199,6 @@ bool TFAttrs::get<bool>(const string& key) const {
 template <>
 int64 TFAttrs::get<int64>(const string& key) const {
   return this->at(key)->i();
-}
-
-template <typename TensorShapeType>
-inline nvinfer1::Dims TensorShapeToTrtDims(const TensorShapeType& shape,
-                                           bool ignore_first_dim) {
-  nvinfer1::Dims trt_dims;
-  const int offset = (ignore_first_dim ? 1 : 0);
-  for (int i = offset; i < shape.dims(); i++) {
-    trt_dims.d[i - offset] = shape.dim_size(i);
-  }
-  trt_dims.nbDims = shape.dims() - offset;
-  return trt_dims;
 }
 
 template <typename Container>
@@ -516,14 +505,6 @@ inline nvinfer1::Dims GetTrtDimsForTensor(const Tensor& tensor) {
     dims.d[i] = tensor.dim_size(i);
   }
   return dims;
-}
-
-inline bool HasStaticShape(const nvinfer1::Dims& dims) {
-  if (dims.nbDims < 0) return false;
-  for (int d = 0; d < dims.nbDims; ++d) {
-    if (dims.d[d] < 0) return false;
-  }
-  return true;
 }
 
 int64_t Prod(const nvinfer1::Dims& dims) {
@@ -1346,9 +1327,10 @@ Status Converter::RenameAndMarkOutputTensors(
 }
 
 Status Converter::BuildCudaEngine(
-    TrtUniquePtrType<nvinfer1::ICudaEngine>* engine, int max_batch_size,
-    size_t max_workspace_size_bytes, nvinfer1::IGpuAllocator* allocator,
-    TRTInt8Calibrator* calibrator) {
+    TrtUniquePtrType<nvinfer1::ICudaEngine>* engine,
+    int max_batch_size, size_t max_workspace_size_bytes,
+    nvinfer1::IGpuAllocator* allocator, TRTInt8Calibrator* calibrator,
+    TrtShapeOptimizationProfile& profiles) {
   VLOG(1) << "Configuring TensorRT builder";
   trt_builder_->setMaxBatchSize(max_batch_size);
   trt_builder_->setGpuAllocator(allocator);
@@ -1368,7 +1350,8 @@ Status Converter::BuildCudaEngine(
       builder_config->setInt8Calibrator(nullptr);
     }
   }
-
+  profiles.configureBuilder(trt_builder_.get(), builder_config.get(),
+                            network());
   VLOG(1) << "Building TensorRT engine";
   engine->reset(trt_builder_->buildEngineWithConfig(*network(), *builder_config));
 #else
@@ -5638,7 +5621,8 @@ Status ConvertGraphDefToEngine(
     nvinfer1::ILogger* trt_logger, nvinfer1::IGpuAllocator* allocator,
     TRTInt8Calibrator* calibrator,
     TrtUniquePtrType<nvinfer1::ICudaEngine>* engine, bool use_calibration,
-    const bool use_implicit_batch, bool* convert_successfully) {
+    const bool use_implicit_batch, bool* convert_successfully,
+    TrtShapeOptimizationProfile& profiles) {
   engine->reset();
   if (convert_successfully) *convert_successfully = false;
 
@@ -5737,7 +5721,8 @@ Status ConvertGraphDefToEngine(
 
   // Build the engine.
   TF_RETURN_IF_ERROR(converter->BuildCudaEngine(
-      engine, max_batch_size, max_workspace_size_bytes, allocator, calibrator));
+      engine, max_batch_size, max_workspace_size_bytes, allocator, calibrator,
+      profiles));
 
   VLOG(1) << "Finished conversion";
   return Status::OK();
