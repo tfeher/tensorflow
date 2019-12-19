@@ -19,6 +19,11 @@ limitations under the License.
 #include <memory>
 
 #include "tensorflow/core/lib/core/status.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+
+#if GOOGLE_CUDA && GOOGLE_TENSORRT
+#include "third_party/tensorrt/NvInfer.h"
+#endif  // GOOGLE_CUDA && GOOGLE_TENSORRT
 
 namespace tensorflow {
 namespace tensorrt {
@@ -68,6 +73,8 @@ string DebugString(const nvinfer1::Dims& dims);
 string DebugString(const nvinfer1::DataType trt_dtype);
 string DebugString(const nvinfer1::Permutation& permutation, int len);
 string DebugString(const nvinfer1::ITensor& tensor);
+string DebugString(const std::vector<nvinfer1::Dims>& dimvec);
+string DebugString(const std::vector<TensorShape>& shapes);
 
 inline bool HasStaticShape(const nvinfer1::Dims& dims) {
   if (dims.nbDims < 0) return false;
