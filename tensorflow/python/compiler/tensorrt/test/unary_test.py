@@ -99,7 +99,7 @@ class UnaryTest(trt_test.TfTrtIntegrationTestBase):
     return ["TRTEngineOp_0"]
 
 
-class UnaryExplicitBatchDimTest(trt_test.TfTrtIntegrationTestBase):
+class UnaryImplicitBatchDimTest(trt_test.TfTrtIntegrationTestBase):
 
   def GraphFn(self, inp):
     """Create a graph containing single segment."""
@@ -108,40 +108,29 @@ class UnaryExplicitBatchDimTest(trt_test.TfTrtIntegrationTestBase):
     return gen_math_ops.exp(val)
 
   def GetParams(self):
-    input_dims = [[[1, 6, 6]]]
-    input_specs = [tensor_spec.TensorSpec([None, None, 6], dtypes.float32,
-                                          "input")]
-    output_specs = input_specs
-    expected_output_dims = input_dims
-
-    return trt_test.TfTrtIntegrationTestParams(
-        graph_fn=self.GraphFn, input_specs=input_specs,
-        output_specs=output_specs, input_dims=input_dims,
-        expected_output_dims=expected_output_dims)
-
-  def GetConversionParams(self, run_params):
-    """Return a ConversionParams for test."""
-    conversion_params = super(UnaryExplicitBatchDimTest,
-                              self).GetConversionParams(run_params)
-    rewrite_config_with_trt = self.GetTrtRewriterConfig(
-        run_params=run_params,
-        conversion_params=conversion_params)
-    found_trt_cfg = False
-    for optimizer in rewrite_config_with_trt.custom_optimizers:
-      if optimizer.name == 'TensorRTOptimizer':
-        found_trt_cfg = True
-        optimizer.parameter_map["use_implicit_batch"].b = False
-        optimizer.parameter_map["minimum_segment_size"].i = 1
-
-    assert found_trt_cfg
-
-    return conversion_params._replace(
-        rewriter_config_template=rewrite_config_with_trt)
+    return self.BuildParams(self.GraphFn, dtypes.float32, [[1,6,6]], [[1,6,6]])
 
   def ExpectedEnginesToBuild(self, run_params):
     """Return the expected engines to build."""
     return ["TRTEngineOp_0"]
 
+
+class UnaryExplicitBatchDimTest(UnaryImplicitBatchDimTest):
+
+  def GetParams(self):
+    return self.BuildParams(self.GraphFn, dtypes.float32, [[1,6,6]], [[1,6,6]],
+                            [[None, None, 6]], [[None, None, 6]])
+
+  def GetConversionParams(self, run_params):
+    """Return a ConversionParams for test."""
+    conversion_params = super(UnaryExplicitBatchDimTest,
+                              self).GetConversionParams(run_params)
+    rewriter_config = self.GetTrtRewriterConfig(
+        run_params=run_params,
+        conversion_params=conversion_params,
+        use_implicit_batch=False)
+    return conversion_params._replace(
+        rewriter_config_template=rewriter_config)
 
 if __name__ == "__main__":
   test.main()
