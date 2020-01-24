@@ -2431,7 +2431,7 @@ Status Converter::SqueezeTensor(nvinfer1::ITensor* input,
 #if IS_TRT_VERSION_GE(6, 0, 0, 0)
   // For dynamic input shapes, we need to use TRT ops to build the new shape.
   const bool is_dynamic =
-      std::count(input_dims.begin(), input_dims.end(), -1) > 1;
+      std::count(input_dims.begin(), input_dims.end(), -1) > 0;
   if (is_dynamic) {
     nvinfer1::ITensor* shape = network()->addShape(*input)->getOutput(0);
     std::vector<nvinfer1::ITensor const*> concat_inputs;
