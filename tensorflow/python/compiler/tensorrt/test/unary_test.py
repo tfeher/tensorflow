@@ -99,7 +99,27 @@ class UnaryTest(trt_test.TfTrtIntegrationTestBase):
     return ["TRTEngineOp_0"]
 
 
-class UnaryImplicitBatchDimTest(trt_test.TfTrtIntegrationTestBase):
+class UnaryExplicitBatchDimTest(UnaryTest):
+  def GetParams(self):
+    return self.BuildParams(
+        self.GraphFn, dtypes.float32,
+        [[12, 5, 8, 1, 1, 12], [12, 5, 8, 1, 12, 1, 1]], [[12, 5, 8, 12]],
+        input_mask=[[12, 5, 8, 1, 1, 12], [12, 5, 8, 1, 12, 1, 1]],
+        output_mask=[[12, 5, 8, 12]])
+
+  def GetConversionParams(self, run_params):
+    """Return a ConversionParams for test."""
+    conversion_params = super(UnaryExplicitBatchDimTest,
+                              self).GetConversionParams(run_params)
+    rewriter_config = self.GetTrtRewriterConfig(
+        run_params=run_params,
+        conversion_params=conversion_params,
+        use_implicit_batch=False)
+    return conversion_params._replace(
+        rewriter_config_template=rewriter_config)
+
+
+class UnarySimpleImplicitBatchDimTest(trt_test.TfTrtIntegrationTestBase):
 
   def GraphFn(self, inp):
     """Create a graph containing single segment."""
@@ -115,7 +135,7 @@ class UnaryImplicitBatchDimTest(trt_test.TfTrtIntegrationTestBase):
     return ["TRTEngineOp_0"]
 
 
-class UnaryExplicitBatchDimTest(UnaryImplicitBatchDimTest):
+class UnarySimpleExplicitBatchDimTest(UnarySimpleImplicitBatchDimTest):
 
   def GetParams(self):
     return self.BuildParams(self.GraphFn, dtypes.float32, [[1,6,6]], [[1,6,6]],
@@ -123,7 +143,7 @@ class UnaryExplicitBatchDimTest(UnaryImplicitBatchDimTest):
 
   def GetConversionParams(self, run_params):
     """Return a ConversionParams for test."""
-    conversion_params = super(UnaryExplicitBatchDimTest,
+    conversion_params = super(UnarySimpleExplicitBatchDimTest,
                               self).GetConversionParams(run_params)
     rewriter_config = self.GetTrtRewriterConfig(
         run_params=run_params,
