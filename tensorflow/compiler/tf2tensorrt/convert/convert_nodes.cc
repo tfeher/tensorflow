@@ -2244,10 +2244,37 @@ Status ConvertTranspose(OpConverterParams* params) {
 Status ConvertReshape(OpConverterParams* params) {
   const auto& inputs = params->inputs;
   const auto& node_def = params->node_def;
-  TF_RETURN_IF_ERROR(
-      CheckInputsWeights(*params, {{"tensor", false}, {"shape", true}}));
   TF_RETURN_IF_ERROR(AllowDataTypes(
       *params, {DataType::DT_FLOAT, DataType::DT_HALF, DataType::DT_INT32}));
+  bool shape_could_be_tensor = !params->use_implicit_batch;
+  if (shape_could_be_tensor) {
+    if (inputs.size() != 2) {
+      return errors::InvalidArgument(node_def.op(), " got ", inputs.size(),
+                                     " inputs but expected 2, at ",
+                                     node_def.name());
+    }
+    if (inputs.at(0).is_weights()) {
+      return errors::Unimplemented("The input \"tensor\" for ", node_def.op(),
+                                   " must be a tensor, at ", node_def.name());
+    }
+  if (inputs.at(1).is_tensor()) {
+    // Note: If the shape is a tensor, we don't do any static checks.
+    // Todo(Tamas) modify PrepareTensorForShape to do this without the checks
+    if (params->validation_only) return Status::OK();
+
+    nvinfer1::IShuffleLayer* layer =
+        params->converter->network()->addShuffle(*inputs.at(0).tensor());
+    layer->setInput(1, *inputs.at(1).tensor());
+    params->converter->MarkQuantizationRangesAsInferrable(inputs.at(0).tensor(),
+                                                          layer->getOutput(0));
+    params->outputs->push_back(TRT_TensorOrWeights(layer->getOutput(0)));
+    return Status::OK();
+  }
+  } else {
+    TF_RETURN_IF_ERROR(
+        CheckInputsWeights(*params, {{"tensor", false}, {"shape", true}}));
+  }
+
   const TRT_TensorOrWeights& input_tensor = inputs.at(0);
   TRT_ShapedWeights weights = inputs.at(1).weights();
   if (weights.count() == 0) {
@@ -2256,93 +2283,95 @@ Status ConvertReshape(OpConverterParams* params) {
   }
 
   const int* weights_ptr = static_cast<int*>(weights.GetValues());
-
-  // Check that it doesn't change the batch dimension. This check is
-  // conservative, for example, when the first dim of the shape is -1 and input
-  // tensor shape is not fixed, it is still possible that the reshape doesn't
-  // change the batch dim, but as long as there is a possibility that it could
-  // change the batch dim, it reject the conversion. The parameters are:
-  //
-  // * reshape_batch_dim: the value of the first dim of the input shape constant
-  // * reshape_dims: all other dims of the input shape constant
-  // * input_batch_dim: the value of the first dim of the input tensor to
-  //   reshape
-  // * input_dims: all other dims of the input tensor to reshape
-  //
-  // The validation logic is:
-  //
-  // if input_batch_dim is fixed:
-  //   if reshape_batch_dim == input_batch_dim:
-  //     ok
-  //   elif reshape_batch_dim == -1 (meaning reshape_dims are fixed) and
-  //        input_dims are fixed and
-  //        prod(input_dims) == prod(reshape_dims)
-  //     ok
-  //   else:
-  //     not ok
-  // elif input_dims are fixed:
-  //   if reshape_dims are fixed and
-  //      prod(input_dims) == prod(reshape_dims):
-  //     ok
-  //   else:
-  //     not ok
-  // else:
-  //   not ok
-  //
-  // Note that the following is ok no matter whether reshape_batch_dim is fixed
-  // or not:
-  //
-  // ```
-  // input_batch_dim is not fixed &&
-  //     reshape_dims are fixed &&
-  //     prod(input_dims) == prod(reshape_dims),
-  // ```
-  //
-  // because the non-batch dims of the new and old shapes match, and TF runtime
-  // should make sure the batch dim is not changed.
-
-  const int input_batch_dim = input_tensor.batch_size();
-  const int reshape_batch_dim = weights_ptr[0];
-  const nvinfer1::Dims input_dims = input_tensor.GetTrtDims();
-
   nvinfer1::Dims reshape_dims;
-  reshape_dims.nbDims = weights.count() - 1;
-  for (int i = 1; i < weights.count(); i++) {
-    reshape_dims.d[i - 1] = weights_ptr[i];
-  }
+  reshape_dims.nbDims = weights.count();
+  std::copy(weights_ptr, weights_ptr + weights.count(), reshape_dims.d);
 
-  // Check that it doesn't change the batch dimension according to the logic
-  // mentioned above.
-  bool reshape_may_change_batch_dim = false;
-  if (input_batch_dim > 0) {        // Batch size is fixed.
-    if (reshape_batch_dim == -1) {  // Other dims of the shape must be fixed.
-      if (!AreDimsStaticWithSameSize(input_dims, reshape_dims,
-                                     /*is_tensor=*/true)) {
+  if (params->use_implicit_batch) {
+    // Check that it doesn't change the batch dimension. This check is
+    // conservative, for example, when the first dim of the shape is -1 and
+    // input tensor shape is not fixed, it is still possible that the reshape
+    // doesn't change the batch dim, but as long as there is a possibility that
+    // it could change the batch dim, it reject the conversion. The parameters
+    // are:
+    //
+    // * reshape_batch_dim: the value of the first dim of the input shape
+    //   constant
+    // * reshape_dims: all other dims of the input shape constant
+    // * input_batch_dim: the value of the first dim of the input tensor to
+    //   reshape
+    // * input_dims: all other dims of the input tensor to reshape
+    //
+    // The validation logic is:
+    //
+    // if input_batch_dim is fixed:
+    //   if reshape_batch_dim == input_batch_dim:
+    //     ok
+    //   elif reshape_batch_dim == -1 (meaning reshape_dims are fixed) and
+    //        input_dims are fixed and
+    //        prod(input_dims) == prod(reshape_dims)
+    //     ok
+    //   else:
+    //     not ok
+    // elif input_dims are fixed:
+    //   if reshape_dims are fixed and
+    //      prod(input_dims) == prod(reshape_dims):
+    //     ok
+    //   else:
+    //     not ok
+    // else:
+    //   not ok
+    //
+    // Note that the following is ok no matter whether reshape_batch_dim is
+    // fixed or not:
+    //
+    // ```
+    // input_batch_dim is not fixed &&
+    //     reshape_dims are fixed &&
+    //     prod(input_dims) == prod(reshape_dims),
+    // ```
+    //
+    // because the non-batch dims of the new and old shapes match, and TF
+    // runtime should make sure the batch dim is not changed.
+    const int input_batch_dim = input_tensor.batch_size();
+    const int reshape_batch_dim = reshape_dims.d[0];
+    const nvinfer1::Dims input_dims = input_tensor.GetTrtDims();
+    TF_RETURN_IF_ERROR(RemoveBatchDimension(&reshape_dims));
+
+    // Check that it doesn't change the batch dimension according to the logic
+    // mentioned above.
+    bool reshape_may_change_batch_dim = false;
+    if (input_batch_dim > 0) {        // Batch size is fixed.
+      if (reshape_batch_dim == -1) {  // Other dims of the shape must be fixed.
+        if (!AreDimsStaticWithSameSize(input_dims, reshape_dims,
+                                       /*is_tensor=*/true)) {
+          reshape_may_change_batch_dim = true;
+        }
+      } else if (reshape_batch_dim != input_batch_dim) {
         reshape_may_change_batch_dim = true;
+      } else {
+        // This means (input_batch_dim>0 && input_batch_dim==reshape_batch_dim),
+        // and TF runtime should make sure non-batch dims are matched.
       }
-    } else if (reshape_batch_dim != input_batch_dim) {
+    } else if (!AreDimsStaticWithSameSize(input_dims, reshape_dims,
+                                          /*is_tensor=*/true)) {
       reshape_may_change_batch_dim = true;
-    } else {
-      // This means (input_batch_dim>0 && input_batch_dim==reshape_batch_dim),
-      // and TF runtime should make sure non-batch dims are matched.
     }
-  } else if (!AreDimsStaticWithSameSize(input_dims, reshape_dims,
-                                        /*is_tensor=*/true)) {
-    reshape_may_change_batch_dim = true;
+    VLOG(1) << "input_batch_dim=" << input_batch_dim
+            << ", input_dims=" << DebugString(input_dims)
+            << "\nreshape_batch_dim=" << reshape_batch_dim
+            << ", reshape_dims=" << DebugString(reshape_dims);
+    if (reshape_may_change_batch_dim) {
+      const string msg =
+          StrCat("Reshape on batch dimension is not supported, at ",
+                 node_def.name(), ". input_batch_dim=", input_batch_dim, ", ",
+                 DebugString(input_dims), "; reshape_batch_dim=",
+                 reshape_batch_dim, ", ", DebugString(reshape_dims));
+      return errors::Unimplemented(msg);
+    }
+  } else {
+    /* Reshape dims is already defined correctly */
   }
-  VLOG(1) << "input_batch_dim=" << input_batch_dim
-          << ", input_dims=" << DebugString(input_dims)
-          << "\nreshape_batch_dim=" << reshape_batch_dim
-          << ", reshape_dims=" << DebugString(reshape_dims);
-  if (reshape_may_change_batch_dim) {
-    const string msg = StrCat(
-        "Reshape on batch dimension is not supported, at ", node_def.name(),
-        ". input_batch_dim=", input_batch_dim, ", ", DebugString(input_dims),
-        "; reshape_batch_dim=", reshape_batch_dim, ", ",
-        DebugString(reshape_dims));
-    return errors::Unimplemented(msg);
-  }
-
   // Start conversion.
   nvinfer1::ITensor* output_tensor = nullptr;
   TF_RETURN_IF_ERROR(params->converter->PrepareTensorForShape(
