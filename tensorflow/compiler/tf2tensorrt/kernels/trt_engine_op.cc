@@ -33,6 +33,7 @@ limitations under the License.
 #include "tensorflow/core/framework/node_def_builder.h"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/graph_def_util.h"
 #include "tensorflow/core/graph/algorithm.h"
 #include "tensorflow/core/graph/graph_constructor.h"
 #include "tensorflow/core/lib/core/refcount.h"
@@ -284,6 +285,8 @@ TRTEngineOp::TRTEngineOp(OpKernelConstruction* context)
                    ConstructFunctionHandle(lib, context->device()->name()));
     OP_REQUIRES_OK(
         context, FunctionDefToGraphDef(func_handle_, lib, &segment_graph_def_));
+   VLOG(2) << "Constructed func_handle_" << static_cast<int>(func_handle_);
+   VLOG(2) << SummarizeGraphDef(segment_graph_def_);
   }
   // TODO(laigd): calibration_data is used in TF v1.x and we keep it only for
   // backward compatibility reasons. Remove it once all known users switch to
@@ -346,6 +349,7 @@ TRTEngineOp::TRTEngineOp(OpKernelConstruction* context)
 void TRTEngineOp::ExecuteNativeSegment(OpKernelContext* ctx,
                                        AsyncHelper* helper) {
   std::vector<Tensor> inputs;
+  std::vector<TensorShape> input_shapes;
   std::vector<Tensor>* outputs = new std::vector<Tensor>();
   if (func_handle_ == kInvalidHandle) {
     OP_REQUIRES_OK_ASYNC(
@@ -361,9 +365,22 @@ void TRTEngineOp::ExecuteNativeSegment(OpKernelContext* ctx,
   inputs.reserve(ctx->num_inputs());
   for (int i = 0; i < ctx->num_inputs(); i++) {
     inputs.push_back(ctx->input(i));
+    input_shapes.push_back(ctx->input(i).shape()); // Tamas dbg
   }
+  VLOG(1) << "Preparing input for native segment: " << DebugString(input_shapes);
   helper->Ref();  // Increment count for calculating native graph
   VLOG(1) << "Executing native segment: " << name();
+  const FunctionBody* fbody;
+  fbody = lib->GetFunctionBody(func_handle_);
+  const FunctionDef& fdef = fbody->fdef;
+  const OpDef& signature = fdef.signature();
+  VLOG(2) << "Instantiate function definition: name=" << signature.name();
+  VLOG(2) << "func_handle_" << static_cast<int>(func_handle_);
+  for (int i = 0, e = signature.input_arg_size(); i < e; ++i) {
+    const OpDef::ArgDef& arg_def = signature.input_arg(i);
+    VLOG(2) << "arg "<< i << " " << arg_def.name();
+  }
+   // end tamas debug
   lib->Run(opts, func_handle_, inputs, outputs,
            [this, ctx, outputs, helper](const Status& s) {
              core::ScopedUnref sc(helper);
