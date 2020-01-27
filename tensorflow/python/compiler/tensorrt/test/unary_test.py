@@ -98,7 +98,6 @@ class UnaryTest(trt_test.TfTrtIntegrationTestBase):
     """Return the expected engines to build."""
     return ["TRTEngineOp_0"]
 
-
 class UnaryExplicitBatchDimTest(UnaryTest):
   def GetParams(self):
     return self.BuildParams(
@@ -118,8 +117,43 @@ class UnaryExplicitBatchDimTest(UnaryTest):
     return conversion_params._replace(
         rewriter_config_template=rewriter_config)
 
+class Unary3ArgTest(trt_test.TfTrtIntegrationTestBase):
 
-class UnarySimpleImplicitBatchDimTest(trt_test.TfTrtIntegrationTestBase):
+  def GraphFn(self, in1, in2, in3):
+    """Create a graph containing single segment."""
+    dtype = in1.dtype
+    val = math_ops.abs(in1)
+    val2 = in2 + in3
+    return gen_math_ops.exp(val + val2)
+
+  def GetParams(self):
+    return self.BuildParams(self.GraphFn, dtypes.float32, [[2,3,3], [2,3,3], [2,3,3]], [[2,3,3]])
+
+  def ExpectedEnginesToBuild(self, run_params):
+    """Return the expected engines to build."""
+    return ["TRTEngineOp_0"]
+
+class Unary3ArgExplicitTest(Unary3ArgTest):
+
+  def GetParams(self):
+    return self.BuildParams(self.GraphFn, dtypes.float32, [[2,3,3], [2,3,3], [2,3,3]], [[2,3,3]], [[None,3,3], [None,3,3], [None,3,3]], [[None,3,3]])
+
+  def GetConversionParams(self, run_params):
+    """Return a ConversionParams for test."""
+    conversion_params = super(Unary3ArgExplicitTest,
+                              self).GetConversionParams(run_params)
+    rewriter_config = self.GetTrtRewriterConfig(
+        run_params=run_params,
+        conversion_params=conversion_params,
+        use_implicit_batch=False)
+    return conversion_params._replace(
+        rewriter_config_template=rewriter_config)
+
+  def ExpectedEnginesToBuild(self, run_params):
+    """Return the expected engines to build."""
+    return ["TRTEngineOp_0"]
+
+class SimpleImplicitBatchDimTest(trt_test.TfTrtIntegrationTestBase):
 
   def GraphFn(self, inp):
     """Create a graph containing single segment."""
@@ -135,22 +169,22 @@ class UnarySimpleImplicitBatchDimTest(trt_test.TfTrtIntegrationTestBase):
     return ["TRTEngineOp_0"]
 
 
-class UnarySimpleExplicitBatchDimTest(UnarySimpleImplicitBatchDimTest):
-
-  def GetParams(self):
-    return self.BuildParams(self.GraphFn, dtypes.float32, [[1,6,6]], [[1,6,6]],
-                            [[None, None, 6]], [[None, None, 6]])
-
-  def GetConversionParams(self, run_params):
-    """Return a ConversionParams for test."""
-    conversion_params = super(UnarySimpleExplicitBatchDimTest,
-                              self).GetConversionParams(run_params)
-    rewriter_config = self.GetTrtRewriterConfig(
-        run_params=run_params,
-        conversion_params=conversion_params,
-        use_implicit_batch=False)
-    return conversion_params._replace(
-        rewriter_config_template=rewriter_config)
+# class SimpleExplicitBatchDimTest(SimpleImplicitBatchDimTest):
+#
+#   def GetParams(self):
+#     return self.BuildParams(self.GraphFn, dtypes.float32, [[1,6,6]], [[1,6,6]],
+#                             [[None, None, 6]], [[None, None, 6]])
+#
+#   def GetConversionParams(self, run_params):
+#     """Return a ConversionParams for test."""
+#     conversion_params = super(SimpleExplicitBatchDimTest,
+#                               self).GetConversionParams(run_params)
+#     rewriter_config = self.GetTrtRewriterConfig(
+#         run_params=run_params,
+#         conversion_params=conversion_params,
+#         use_implicit_batch=False)
+#     return conversion_params._replace(
+#         rewriter_config_template=rewriter_config)
 
 if __name__ == "__main__":
   test.main()
