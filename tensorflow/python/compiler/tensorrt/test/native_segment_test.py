@@ -34,15 +34,6 @@ class AddTest(trt_test.TfTrtIntegrationTestBase):
     val = inp + inp
     return math_ops.abs(val)
 
-  def GetConversionParams(self, run_params):
-    """Return a ConversionParams for test."""
-    conversion_params = super(AddTest,
-                              self).GetConversionParams(run_params)
-
-    # Asking for 128 GB of TensorRT workspace size, which will fail.
-    # We expect that the native segment fallback will be used in TRTEngineOp
-    return conversion_params._replace(max_workspace_size_bytes=1<<37)
-
   def GetParams(self):
     return self.BuildParams(self.GraphFn, dtypes.float32, [[1,1]], [[1,1]])
 
@@ -57,40 +48,8 @@ class MulTest(trt_test.TfTrtIntegrationTestBase):
     val = inp1 * inp2
     return math_ops.abs(val)
 
-  def GetConversionParams(self, run_params):
-    """Return a ConversionParams for test."""
-    conversion_params = super(MulTest,
-                              self).GetConversionParams(run_params)
-    # Asking for 128 GB of TensorRT workspace size, which will fail.
-    # We expect that the native segment fallback will be used in TRTEngineOp
-    return conversion_params._replace(max_workspace_size_bytes=1<<37)
-
   def GetParams(self):
     return self.BuildParams(self.GraphFn, dtypes.float32, [[2,2,2],[2,2,2]],
-                            [[2,2,2]])
-
-  def ExpectedEnginesToBuild(self, run_params):
-    """Return the expected engines to build."""
-    return ["TRTEngineOp_0"]
-
-class MulTest3(trt_test.TfTrtIntegrationTestBase):
-  def GraphFn(self, inp1, inp2, inp3):
-    """Create a graph containing single segment."""
-    dtype = inp1.dtype
-    val = inp1 * inp2 + inp3
-    return math_ops.abs(val)
-
-  def GetConversionParams(self, run_params):
-    """Return a ConversionParams for test."""
-    conversion_params = super(MulTest3,
-                              self).GetConversionParams(run_params)
-    # Asking for 128 GB of TensorRT workspace size, which will fail.
-    # We expect that the native segment fallback will be used in TRTEngineOp
-    return conversion_params._replace(max_workspace_size_bytes=1<<37)
-
-  def GetParams(self):
-    return self.BuildParams(self.GraphFn, dtypes.float32,
-                            [[2,2,2],[2,2,2],[2,2,2]],
                             [[2,2,2]])
 
   def ExpectedEnginesToBuild(self, run_params):
