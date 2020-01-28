@@ -126,6 +126,7 @@ cuda_py_tests(
         "test/memory_alignment_test.py",
         "test/multi_connection_neighbor_engine_test.py",
         "test/native_segment_test.py",
+        "test/native_segment_test2.py",
         "test/neighboring_engine_test.py",
         "test/quantization_test.py",
         "test/rank_two_test.py",
