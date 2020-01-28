@@ -390,14 +390,22 @@ class TfTrtIntegrationTestBase(test_util.TensorFlowTestCase):
 
     converter = self._CreateConverter(run_params, saved_model_dir,
                                       session_config, conversion_params)
-    int8_gdef = converter.convert()
-    self._VerifyGraphDef(run_params, saved_model_dir, int8_gdef,
-                         GraphState.CALIBRATE)
+    if run_params.is_v2:
+      def _calibration_fn():
+        for input in inputs_data:
+            yield input
 
-    converter.calibrate(
-        fetch_names=self._GetFetchNames(),
-        num_runs=5,
-        feed_dict_fn=lambda: self._GetFeedDict(inputs_data[0]))
+      converter.convert(calibration_input_fn=_calibration_fn)
+
+    else:
+      int8_gdef = converter.convert()
+      self._VerifyGraphDef(run_params, saved_model_dir, int8_gdef,
+                         GraphState.CALIBRATE)
+      converter.calibrate(
+          fetch_names=self._GetFetchNames(),
+          num_runs=5,
+          feed_dict_fn=lambda: self._GetFeedDict(inputs_data[0]))
+
     trt_saved_model_dir = self._GetSavedModelDir(run_params,
                                                  GraphState.CALIBRATE)
     converter.save(trt_saved_model_dir)
@@ -796,7 +804,8 @@ def _GetTestConfigsV2():
                         [no_calibration]))
   # We always run calibration with offline tool.
   # TODO(aaroey): INT8+calibration is not supported yet in V2.
-  # opts.append((INT8, convert_offline, dynamic_engine, use_calibration))
+  use_calibration=True
+  opts.append((INT8, convert_offline, dynamic_engine, use_calibration))
   return opts
 
 
