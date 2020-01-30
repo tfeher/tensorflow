@@ -22,6 +22,7 @@ import numpy as np
 
 from tensorflow.python.compiler.tensorrt.test import tf_trt_integration_test_base as trt_test
 from tensorflow.python.framework import dtypes
+from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import gen_math_ops
 from tensorflow.python.ops import math_ops
 from tensorflow.python.platform import test
@@ -32,7 +33,8 @@ class AddTest(trt_test.TfTrtIntegrationTestBase):
     """Create a graph containing single segment."""
     dtype = inp.dtype
     val = inp + inp
-    return math_ops.abs(val)
+    abs = math_ops.abs(val)
+    return array_ops.identity(abs, name="output_0")
 
   def GetParams(self):
     return self.BuildParams(self.GraphFn, dtypes.float32, [[1,1]], [[1,1]])
@@ -46,7 +48,8 @@ class MulTest(trt_test.TfTrtIntegrationTestBase):
     """Create a graph containing single segment."""
     dtype = inp1.dtype
     val = inp1 * inp2
-    return math_ops.abs(val)
+    abs = math_ops.abs(val)
+    return array_ops.identity(abs, name="output_0")
 
   def GetParams(self):
     return self.BuildParams(self.GraphFn, dtypes.float32, [[2,2,2],[2,2,2]],
