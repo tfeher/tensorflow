@@ -32,6 +32,7 @@ limitations under the License.
 #include "tensorflow/core/framework/node_def_builder.h"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/graph_def_util.h"
 #include "tensorflow/core/graph/algorithm.h"
 #include "tensorflow/core/graph/graph_constructor.h"
 #include "tensorflow/core/lib/core/refcount.h"
@@ -279,6 +280,8 @@ TRTEngineOp::TRTEngineOp(OpKernelConstruction* context)
                    ConstructFunctionHandle(lib, context->device()->name()));
     OP_REQUIRES_OK(
         context, FunctionDefToGraphDef(func_handle_, lib, &segment_graph_def_));
+   VLOG(2) << "Constructed func_handle_" << static_cast<int>(func_handle_);
+   VLOG(2) << SummarizeGraphDef(segment_graph_def_);
   }
   // TODO(laigd): calibration_data is used in TF v1.x and we keep it only for
   // backward compatibility reasons. Remove it once all known users switch to
