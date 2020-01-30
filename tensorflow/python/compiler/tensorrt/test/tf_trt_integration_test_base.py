@@ -799,9 +799,9 @@ def _GetTestConfigsV2():
   # - For simplicity we don't test online conversion which requires setting the
   #   Grappler config in default eager context.
   # - INT8 without calibration behaves like FP32/FP16.
-  opts = list(
-      itertools.product([FP32, FP16, INT8], [convert_offline], [dynamic_engine],
-                        [no_calibration]))
+  opts = list()
+  #    itertools.product([FP32, FP16, INT8], [convert_offline], [dynamic_engine],
+  #                      [no_calibration]))
   # We always run calibration with offline tool.
   # TODO(aaroey): INT8+calibration is not supported yet in V2.
   use_calibration=True
@@ -850,7 +850,7 @@ def _AddTestsFor(test_class, is_v2):
 
 def _AddTests(test_class):
   """Adds test methods to TfTrtIntegrationTestBase."""
-  _AddTestsFor(test_class, is_v2=False)
+  #_AddTestsFor(test_class, is_v2=False)
   _AddTestsFor(test_class, is_v2=True)
 
 
