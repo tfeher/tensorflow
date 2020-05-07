@@ -35,14 +35,16 @@ void TrtShapeOptimizationProfile::InitProfiles() {
             << "for each input (min=opt=max).";
   }
   for (auto& shape_vec : input_shapes_) {
-    std::vector<nvinfer1::Dims> dimvec;
-    for (auto& shape : shape_vec) {
-      dimvec.push_back(TensorShapeToTrtDims(shape, false));
+    if (!shape_vec.empty()) {
+      std::vector<nvinfer1::Dims> dimvec;
+      for (auto& shape : shape_vec) {
+        dimvec.push_back(TensorShapeToTrtDims(shape, false));
+      }
+      // We set min=opt=max.
+      OptimizationProfileConfig profConfig{dimvec, dimvec, dimvec};
+      profiles_.push_back(std::move(profConfig));
+      VLOG(1) << "Created profile " << profiles_.back().DebugString();
     }
-    // We set min=opt=max.
-    OptimizationProfileConfig profConfig{dimvec, dimvec, dimvec};
-    profiles_.push_back(std::move(profConfig));
-    VLOG(1) << "Created profile " << profiles_.back().DebugString();
   }
 }
 
