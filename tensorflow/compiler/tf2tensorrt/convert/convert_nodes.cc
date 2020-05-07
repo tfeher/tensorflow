@@ -5419,6 +5419,8 @@ Status ConvertFullyConnectedHelper(OpConverterParams* params,
                                    TRT_ShapedWeights weights_b,
                                    bool transpose_b, const NodeDef& node_def) {
   // Reshape input to 3D - this will be a no-op unless using int8 precision.
+  VLOG(2) << "called FullyConnectedHelper"
+          << DebugString(tensor_a->getDimensions());
   auto input_dim = tensor_a->getDimensions();
   while (input_dim.nbDims < 3) {
     input_dim.d[input_dim.nbDims++] = 1;
@@ -5426,6 +5428,7 @@ Status ConvertFullyConnectedHelper(OpConverterParams* params,
   TF_RETURN_IF_ERROR(PrepareTensorForShape(
       params->converter, TRT_TensorOrWeights(tensor_a), input_dim,
       /*validation_only=*/false, &tensor_a, node_def, /*op_instance=*/0));
+  VLOG(2) << "New shape of A" << DebugString(tensor_a->getDimensions());
 
   // FC layer will transpose weights, so we need to pre-transpose.
   TRT_ShapedWeights weights(weights_b.TrtDType());
@@ -5445,9 +5448,10 @@ Status ConvertFullyConnectedHelper(OpConverterParams* params,
   params->converter->SetLayerName(layer, node_def);
   nvinfer1::ITensor* output_tensor = layer->getOutput(0);
 
-  // Reshape output to 1D - this will be a no-op unless using int8 precision.
+  // A fully connected layer produces output with two trailing singleton
+  // dimension. We remove these.
   auto output_dim = output_tensor->getDimensions();
-  output_dim.nbDims = 1;
+  output_dim.nbDims -= 2;
   TF_RETURN_IF_ERROR(PrepareTensorForShape(
       params->converter, TRT_TensorOrWeights(output_tensor), output_dim,
       /*validation_only=*/false, &output_tensor, node_def, /*op_instance=*/1));
@@ -5462,6 +5466,12 @@ Status ConvertMatMulHelper(OpConverterParams* params,
                            bool transpose_b, const NodeDef& node_def) {
   // TODO: ReorderCKtoKC is currently not general enough to transpose weights
   // that are not 2D.
+  // TODO(tfeher): Why would we transpose weights? Why not let the MatMul layer
+  // handle it?
+  // Maybe to allow running MatMul in implicit batch mode as batched vector
+  // matrix product?
+  VLOG(2) << "ConvMatMulHelp a.shape " << DebugString(input_a.GetTrtDims())
+          << ", b.shape " << DebugString(input_b.GetTrtDims());
   if ((transpose_a && input_a.is_weights() &&
        input_a.GetTrtDims().nbDims != 2) ||
       (transpose_b && input_b.is_weights() &&
@@ -5470,28 +5480,65 @@ Status ConvertMatMulHelper(OpConverterParams* params,
         "Cannot currently transpose constant input if it is not 2 dimensional");
   }
 
-  // If A is a tensor, we can only transpose if it is at least 3D in TF,
-  // or TRT will not do the correct transposition.
+  // In implicit batch mode, if A is a tensor and it needs to be transposed,
+  // then it needs to have at least two non-batch dimensions (at least 3D in TF)
   if (transpose_a && input_a.is_tensor() && input_a.GetTrtDims().nbDims < 2) {
     return errors::InvalidArgument(
         "Cannot transpose first input if it is a tensor with fewer than 2 "
         "non-batch dimensions.");
   }
 
-  // If B is a tensor, then it must be at least 3D in TF,
-  // or TRT won't be able to handle the multiply correctly.
+  // In implicit batch mode, if B is a tensor and it needs to be transposed,
+  // then it needs to have at least two non-batch dimensions (at least 3D in TF)
   if (input_b.is_tensor() && input_b.GetTrtDims().nbDims < 2) {
-    return errors::InvalidArgument(
-        "Second input must either be a constant, or contain at least 2 "
-        "non-batch dimensions.");
+    if (!(params->use_implicit_batch && input_a.is_weights()) && transpose_b) {
+      // B will be interpreted as a batch of vectors. The vector product of it
+      // is equivalent with a matrix broduct with B.T. But only if A is weights.
+      // If input_a is weight, then
+      transpose_b = false;
+    } else {
+      return errors::InvalidArgument(
+          "Second input must either be a constant, or contain at least 2 "
+          "non-batch dimensions.");
+    }
   }
+
+  if (input_a.GetTrtDims().nbDims < 2 && input_a.is_tensor() &&
+      input_b.GetTrtDims().nbDims < 2 && input_b.is_tensor() &&
+      params->use_implicit_batch) {
+    // In implicit batch mode the two matrices would be implemented as two
+    // batches of vectors, and their dot product would create a batch of
+    // scalars. This is not equivalent to the matrix multiplication we are
+    // trying to convert.
+    return errors::InvalidArgument(
+        "MatMul with 2D tensors requires explicit batch mode");
+    // If b is weight, then we could use fully connected.
+  } else {
+    VLOG(2) << "a tensor: " << input_a.is_tensor()
+            << "b tensor: " << input_b.is_tensor();
+  }
+
   if (params->validation_only) return Status::OK();
 
   // If an FC layer can be used and would be faster, use that instead.
-  const bool can_use_fc =
-      !transpose_a && input_a.is_tensor() && input_b.is_weights();
-  const bool should_use_fc = can_use_fc && input_a.GetTrtDims().nbDims >= 3 &&
-                             input_b.GetTrtDims().nbDims == 2;
+  // The last three dimensions of A must be runtime constant.
+  const int ndims_a = input_a.GetTrtDims().nbDims;
+  const bool can_use_fc = !transpose_a && input_a.is_tensor() &&
+                          input_b.is_weights() &&
+                          input_a.GetTrtDims().d[ndims_a - 1] != -1 &&
+                          input_a.GetTrtDims().d[ndims_a - 2] != -1 &&
+                          input_a.GetTrtDims().d[ndims_a - 3] != -1;
+  // n_dims_a is only tested for should_use_fc, because in case of
+  // int8, we can add extra singleton dimensions if needed
+  // TODO(tfeher): One could swap a and b if one of them is weights, so that we
+  //  could fit FC criteria.
+  const bool should_use_fc =
+      can_use_fc && ndims_a >= 3 && input_b.GetTrtDims().nbDims == 2;
+  // This does not make sense at all. TF requires that nbDims are the same
+  // so it can never happenthat ndims_a >= 3 but ndims_b  == 2 (BatchMatMulV2
+  // can broadcast, but the shapes were already proadcasted to have matching
+  // rank. )
+  VLOG(2) << "Matmul should/can FC " << should_use_fc << " " << can_use_fc;
   // If int8 is specified, FC must be used unless it is not compatible, as MM
   // does not support int8 at this time.
   if (should_use_fc || (can_use_fc && params->converter->precision_mode() ==
@@ -5502,17 +5549,20 @@ Status ConvertMatMulHelper(OpConverterParams* params,
 
   const auto get_matrix_op = [](nvinfer1::ITensor* in,
                                 bool transpose) -> nvinfer1::MatrixOperation {
-    return (in->getDimensions().nbDims < 2) ? nvinfer1::MatrixOperation::kVECTOR
-           : (transpose) ? nvinfer1::MatrixOperation::kTRANSPOSE
-                         : nvinfer1::MatrixOperation::kNONE;
+    return (in->getDimensions().nbDims < 2)
+               ? nvinfer1::MatrixOperation::kVECTOR
+               : (transpose) ? nvinfer1::MatrixOperation::kTRANSPOSE
+                             : nvinfer1::MatrixOperation::kNONE;
+    // TODO(tfeher) kVECTOR might need additional kTRANSPOSE to improve
+    // implicit batch convergence
   };
 
   // If the MatMul operand is a constant, applies transposes at conversion-time
   // as necessary. If the operand is a tensor, does nothing. If required
   // transposes were applied, sets transpose to false.
-  const auto prepare_matmul_operand =
-      [&params](TRT_TensorOrWeights operand,
-                bool* transpose) -> nvinfer1::ITensor* {
+  const auto prepare_matmul_operand = [&params](TRT_TensorOrWeights operand,
+                                                bool* transpose,
+                                                int num) -> nvinfer1::ITensor* {
     if (operand.is_tensor()) {
       return operand.tensor();
     } else {
@@ -5525,24 +5575,49 @@ Status ConvertMatMulHelper(OpConverterParams* params,
       } else {
         weights = operand.weights();
       }
-      return params->converter->CreateConstantLayer(weights, weights.shape_);
+      std::vector<int> weights_shape(weights.shape_.d,
+                                     weights.shape_.d + weights.shape_.nbDims);
+      // TODO(tfeher) Do we need this? This should be treated by FC.
+      // if (!params->use_implicit_batch) {
+      //   // In explicit batch mode, MatrixMultiply layer is always a batch mat
+      //   // mul. No this is not the case, we can have simply 2D matrices.
+      //
+      //    So we need to add a batch dim of 1 to the second operand of
+      //   // MatMul. For MatMul, need to make matrix broadcast over batch
+      //   if (params->node_def.op() == "MatMul" && num == 1 &&
+      //       weights.shape_.nbDims == 2) {
+      //     weights_shape.insert(weights_shape.begin(), 1);
+      //   }
+      // }
+      nvinfer1::Dims weights_new_dims;
+      TensorShapeArrayToTrtDims(weights_shape, &weights_new_dims);
+      return params->converter->CreateConstantLayer(weights, weights_new_dims);
     }
   };
 
-  nvinfer1::ITensor* tensor_a = prepare_matmul_operand(input_a, &transpose_a);
-  nvinfer1::ITensor* tensor_b = prepare_matmul_operand(input_b, &transpose_b);
+  nvinfer1::ITensor* tensor_a =
+      prepare_matmul_operand(input_a, &transpose_a, 0);
+  nvinfer1::ITensor* tensor_b =
+      prepare_matmul_operand(input_b, &transpose_b, 1);
 
+  nvinfer1::MatrixOperation op_a, op_b;
+  op_a = get_matrix_op(tensor_a, transpose_a);
+  op_b = get_matrix_op(tensor_b, transpose_b);
+
+  if (op_b == nvinfer1::MatrixOperation::kVECTOR) {
+    // We are in implicit batch mode.
+    VLOG(2) << "Using b as vector, results might be incorrect";
+  }
   nvinfer1::IMatrixMultiplyLayer* layer =
-      params->converter->network()->addMatrixMultiply(
-          *tensor_a, get_matrix_op(tensor_a, transpose_a), *tensor_b,
-          get_matrix_op(tensor_b, transpose_b));
+      params->converter->network()->addMatrixMultiply(*tensor_a, op_a,
+                                                      *tensor_b, op_b);
 
   TFTRT_RETURN_ERROR_IF_NULLPTR(layer, node_def.name());
   params->converter->SetLayerName(layer, node_def);
   nvinfer1::ITensor* output_tensor = layer->getOutput(0);
   params->outputs->push_back(TRT_TensorOrWeights(output_tensor));
   return Status::OK();
-}
+}  // namespace convert
 
 // inputs are both two dimensional (ops::MatMul)
 Status ConvertMatMul(OpConverterParams* params) {
@@ -5553,6 +5628,7 @@ Status ConvertMatMul(OpConverterParams* params) {
                                    " inputs but expected 2, at ",
                                    node_def.name());
   }
+  // TODO(tfeher): Consider adding INT8 type because FC layer can support it.
   TF_RETURN_IF_ERROR(
       AllowDataTypes(*params, {DataType::DT_FLOAT, DataType::DT_HALF}));
 
@@ -5572,9 +5648,9 @@ Status ConvertBatchMatMul(OpConverterParams* params) {
                                    " inputs but expected 2, at ",
                                    node_def.name());
   }
-  // TODO(tmorris): Enable once false is updated to mean either tensor or weight
-  // TF_RETURN_IF_ERROR(CheckInputsWeights(*params, {{"x", false}, {"y",
-  // false}}));
+  TF_RETURN_IF_ERROR(CheckInputsWeights(
+      *params, {{"x", TrtInputArg::kBoth}, {"y", TrtInputArg::kBoth}}));
+  // TODO(tfeher): Consider adding INT8 type because FC layer can support it.
   TF_RETURN_IF_ERROR(
       AllowDataTypes(*params, {DataType::DT_FLOAT, DataType::DT_HALF}));
   if (inputs.at(0).is_weights() && inputs.at(1).is_weights()) {
@@ -5591,7 +5667,8 @@ Status ConvertBatchMatMul(OpConverterParams* params) {
   const bool transpose_a = attrs.get<bool>("adj_x");
   const bool transpose_b = attrs.get<bool>("adj_y");
 
-  // There is no way to batch constants in TRT. Example:
+  // There is no way to batch constants in TRT if implicit batch mode is used.
+  // Example:
   // Tensor with TF Dims: 12 5 3 -> TRT Dims: 5 3
   // Weight with TF Dims: 12 3 6 -> TRT Dims: 12 3 6
   // It is not possible to treat the weight input as a batched [3, 6] tensor.
@@ -5608,8 +5685,10 @@ Status ConvertBatchMatMul(OpConverterParams* params) {
         }
         return Status::OK();
       };
-  TF_RETURN_IF_ERROR(check_weight_is_not_batched(inputs.at(0), inputs.at(1)));
-  TF_RETURN_IF_ERROR(check_weight_is_not_batched(inputs.at(1), inputs.at(0)));
+  if (params->use_implicit_batch) {
+    TF_RETURN_IF_ERROR(check_weight_is_not_batched(inputs.at(0), inputs.at(1)));
+    TF_RETURN_IF_ERROR(check_weight_is_not_batched(inputs.at(1), inputs.at(0)));
+  }
 
   // Broadcast inputs. We don't check feasibility since the dimensions in a
   // MatMul don't need to match. For example, consider a valid set of inputs

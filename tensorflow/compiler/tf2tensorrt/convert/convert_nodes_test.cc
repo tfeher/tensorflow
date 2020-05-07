@@ -32,8 +32,6 @@ limitations under the License.
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
-#include "third_party/gpus/cuda/include/cuda.h"
-#include "third_party/gpus/cuda/include/cuda_runtime_api.h"
 #include "tensorflow/cc/framework/ops.h"
 #include "tensorflow/cc/framework/scope.h"
 #include "tensorflow/cc/ops/nn_ops_internal.h"
@@ -58,6 +56,8 @@ limitations under the License.
 #include "tensorflow/core/platform/test.h"
 #include "tensorflow/core/protobuf/config.pb.h"  // NOLINT
 #include "tensorflow/core/public/session.h"
+#include "third_party/gpus/cuda/include/cuda.h"
+#include "third_party/gpus/cuda/include/cuda_runtime_api.h"
 #include "third_party/tensorrt/NvInfer.h"
 
 namespace tensorflow {
@@ -1781,6 +1781,10 @@ class ParameterizedOpConverterTestBase
     LOG(INFO) << "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%";
   }
 
+  void Reset(TrtPrecisionMode converter_precision) {
+    OpConverterTest::Reset(converter_precision, trt_mode_);
+    input_data_.clear();
+  }
   void Reset() {
     OpConverterTest::Reset(converter_precision_, trt_mode_);
     input_data_.clear();
@@ -2470,7 +2474,7 @@ TEST_P(OpConverter_FP32_Test, ConvertShape) {
 // get_matmul corresponds to the function used to generate the node. It should
 // accept (DataType, transpose_a, transpose_b) as parameters.
 void TestMatMulHelper(
-    OpConverterTest* test,
+    ParameterizedOpConverterTestBase* test,
     const std::function<NodeDef(DataType, bool, bool)>& get_matmul,
     const std::string& op_name) {
   // HACK: This needs to be done in a better way.
@@ -2479,8 +2483,7 @@ void TestMatMulHelper(
     // Unsupported data type.
     test->Reset();
     NodeDef node_def = get_matmul(DT_INT32, false, false);
-    test->AddTestTensor("input", {2}, /*batch_size=*/1,
-                        nvinfer1::DataType::kINT32);
+    test->AddTestTensor("input", {1, 2}, DT_INT32, {});
     test->AddTestWeights<int32>("weights", {2, 1}, {3, 5});
     test->RunValidationAndConversion(
         node_def, error::UNIMPLEMENTED,
@@ -2488,65 +2491,131 @@ void TestMatMulHelper(
                ", must be one of [float, half], at my_matmul")
             .c_str());
   }
+  struct TestParams {
+    std::vector<int> shape_a;
+    std::vector<int> values_a;
+    std::vector<int> shape_b;
+    std::vector<int> values_b;
+    std::vector<int> expected_shape;
+  };
+  std::vector<TestParams> params{
+      //  TestParams{{2, 2}, {0, 1, 2, 3}, {2, 2}, {0, 1, 2, 3}, {2, 2}},
+      TestParams{{1, 2, 2}, {0, 1, 2, 3}, {1, 2, 2}, {0, 1, 2, 3}, {1, 2, 2}},
+      // TestParams{
+      //     {1, 1, 2, 2}, {0, 1, 2, 3}, {1, 1, 2, 2}, {0, 1, 2, 3}, {1, 1, 2,
+      //     2}},
+      // TestParams{{1, 1, 2, 2}, {0, 1, 2, 3}, {2, 2}, {0, 1, 2, 3}, {1, 1, 2,
+      // 2}}
+      // Test also on 4D tensors, to see if FC would help
+  };
   // OK.
-  for (bool transpose_a : {false, true}) {
-    for (bool transpose_b : {false, true}) {
-      test->Reset();
-      NodeDef node_def = get_matmul(DT_FLOAT, transpose_a, transpose_b);
-      test->AddTestTensor("input", {2}, /*batch_size=*/1);
-      test->AddTestWeights<float>("weights", {2, 2}, {0, 1, 2, 3});
-      if (is_batch_matmul) {
-        test->RunValidationAndConversion(
-            node_def, error::UNIMPLEMENTED,
-            "TensorRT does not support batched constants.");
-        continue;
-      } else if (transpose_a) {
-        test->RunValidationAndConversion(
-            node_def, error::INVALID_ARGUMENT,
-            "Cannot transpose first input if it is a tensor with fewer than 2 "
-            "non-batch dimensions");
-        continue;
-      }
-      test->RunValidationAndConversion(node_def);
-      TRT_TensorOrWeights output;
-      TF_EXPECT_OK(test->GetTensorOrWeights("my_matmul", &output));
-      ASSERT_TRUE(output.is_tensor());
-      ExpectTrtDimsEqualsArray({2}, output.tensor()->getDimensions());
+  for (auto p : params) {
+    for (bool transpose_a : {false, true}) {
+      for (bool transpose_b : {false, true}) {
+        for (bool a_is_tensor : {true, false}) {
+          for (bool b_is_tensor : {true, false}) {
+            if (!a_is_tensor && !b_is_tensor) {
+              // Skip test when both args are weights, as we do not convert
+              // this (const folding eliminates this case).
+              continue;
+            }
+            if ((!a_is_tensor || !b_is_tensor) && p.shape_a.size() > 2 &&
+                // TODO(tfeher) SHould this work?
+                // This can only work if the weight has no batch dim
+                // specified explicitly.  OR if it has batch dim as 1.
+                // In general we can skip this.
+                test->get_trt_mode() == TrtTestMode::kImplicitBatch) {
+              VLOG(2) << "skipping implicit batch test with weight";
+              // TODO(tfeher): Throw error message, and check it here
+              continue;
+            }
+            SCOPED_TRACE(StrCat("A", transpose_a ? ".T" : "", " is ",
+                                a_is_tensor ? "tensor" : "weight", ", B",
+                                transpose_b ? ".T" : "", " is ",
+                                b_is_tensor ? "tensor" : "weight, ",
+                                p.shape_a.size()));
+            VLOG(2) << StrCat("A", transpose_a ? ".T" : "", " is ",
+                              a_is_tensor ? "tensor" : "weight", ", B",
+                              transpose_b ? ".T" : "", " is ",
+                              b_is_tensor ? "tensor" : "weight, ",
+                              p.shape_a.size());
+            test->Reset();
+            NodeDef node_def =
+                get_matmul(test->get_tf_type(), transpose_a, transpose_b);
 
-      const DataVec input_data{{"input", test->AsTensor<float>({0, 1})}};
-      DataVec output_data{{"my_matmul", test->ConstructTensor<float>(2)}};
-      TF_EXPECT_OK(test->BuildAndRun(input_data, &output_data));
-      if (transpose_b) {
-        EXPECT_THAT(GetSpanForData<float>(output_data[0]), ElementsAre(1, 3));
-      } else {
-        EXPECT_THAT(GetSpanForData<float>(output_data[0]), ElementsAre(2, 3));
+            Status add_b_status = Status::OK();
+            if (a_is_tensor && b_is_tensor && p.shape_a[0] != p.shape_b[0] &&
+                test->get_trt_mode() == TrtTestMode::kImplicitBatch) {
+              add_b_status = errors::InvalidArgument(
+                  "Batch size doesn't match for tensor weights: "
+                  "Provided batch size does not match converter "
+                  "batch size: 2 vs 1");
+            }
+            if (a_is_tensor) {
+              test->AddTestTensor("input", p.shape_a, p.values_a);
+            } else {
+              test->AddTestWeights("input", p.shape_a, p.values_a,
+                                   test->get_tf_type());
+            }
+            if (b_is_tensor) {
+              test->AddTestTensor("weights", p.shape_b, test->get_tf_type(),
+                                  p.values_b, {}, add_b_status);
+            } else {
+              test->AddTestWeights("weights", p.shape_b, p.values_b,
+                                   test->get_tf_type());
+            }
+            Status conversion_status = Status::OK();
+
+            if (is_batch_matmul && (!a_is_tensor || !b_is_tensor) &&
+                test->get_trt_mode() == TrtTestMode::kImplicitBatch) {
+              conversion_status =
+                  Status{error::UNIMPLEMENTED,
+                         "TensorRT does not support batched constants."};
+            } else if (transpose_a && !a_is_tensor && p.shape_a.size() > 2) {
+              conversion_status = Status{error::INVALID_ARGUMENT,
+                                         "Cannot currently transpose constant "
+                                         "input if it is not 2 dimensional"};
+            } else if (transpose_b && !b_is_tensor && p.shape_b.size() > 2) {
+              conversion_status = Status{error::INVALID_ARGUMENT,
+                                         "Cannot currently transpose constant "
+                                         "input if it is not 2 dimensional"};
+            } else if (transpose_a && a_is_tensor && p.shape_a.size() <= 2 &&
+                       test->get_trt_mode() == TrtTestMode::kImplicitBatch) {
+              conversion_status =
+                  Status{error::INVALID_ARGUMENT,
+                         "Cannot transpose first input if it is "
+                         "a tensor with fewer than 2 "
+                         "non-batch dimensions"};
+            } else if (b_is_tensor && p.shape_b.size() <= 2 &&
+                       test->get_trt_mode() == TrtTestMode::kImplicitBatch) {
+              if (!transpose_b || !a_is_tensor) {
+                conversion_status = Status{error::INVALID_ARGUMENT,
+                                           "Second input must either be a "
+                                           "constant, or contain at least 2 "
+                                           "non-batch dimensions."};
+              }
+            }
+            if (conversion_status.ok() &&
+                test->get_trt_mode() == TrtTestMode::kImplicitBatch &&
+                ((a_is_tensor && p.shape_a.size() == 2) &&
+                 (b_is_tensor && p.shape_b.size() == 2))) {
+              conversion_status = errors::InvalidArgument(
+                  "MatMul with 2D tensors requires explicit batch mode");
+            }
+            std::vector<float> expected_output;
+            if (transpose_a) {
+              expected_output = transpose_b ? std::vector<float>{2, 6, 3, 11}
+                                            : std::vector<float>{4, 6, 6, 10};
+            } else {
+              expected_output = transpose_b ? std::vector<float>{1, 3, 3, 13}
+                                            : std::vector<float>{2, 3, 6, 11};
+            }
+            test->TestOpConverter("my_matmul", node_def, p.expected_shape,
+                                  conversion_status, Status::OK(),
+                                  ElementsAreArray(expected_output));
+          }
+        }
       }
-    }
-  }
-  // OK, 3D inputs
-  for (bool transpose_b : {false, true}) {
-    test->Reset();
-    NodeDef node_def = get_matmul(DT_FLOAT, /*transpose_a=*/false, transpose_b);
-    test->AddTestTensor("input", {2}, /*batch_size=*/1);
-    test->AddTestWeights<float>("weights", {2, 2}, {0, 1, 2, 3});
-    if (is_batch_matmul) {
-      test->RunValidationAndConversion(
-          node_def, error::UNIMPLEMENTED,
-          "TensorRT does not support batched constants.");
-      continue;
-    }
-    test->RunValidationAndConversion(node_def);
-    TRT_TensorOrWeights output;
-    TF_EXPECT_OK(test->GetTensorOrWeights("my_matmul", &output));
-    ASSERT_TRUE(output.is_tensor());
-    ExpectTrtDimsEqualsArray({2}, output.tensor()->getDimensions());
-    const DataVec input_data{{"input", test->AsTensor<float>({0, 1})}};
-    DataVec output_data{{"my_matmul", test->ConstructTensor<float>(2)}};
-    TF_EXPECT_OK(test->BuildAndRun(input_data, &output_data));
-    if (transpose_b) {
-      EXPECT_THAT(GetSpanForData<float>(output_data[0]), ElementsAre(1, 3));
-    } else {
-      EXPECT_THAT(GetSpanForData<float>(output_data[0]), ElementsAre(2, 3));
     }
   }
 }
@@ -2563,7 +2632,7 @@ void CheckAddedLayers(OpConverterTest* test, bool expect_found) {
   EXPECT_EQ(expect_found, layer_found);
 }
 
-TEST_F(OpConverterTest, ConvertMatMul) {
+TEST_P(OpConverter_FP32_Test, ConvertMatMul) {
   // Get the NodeDef for MatMul.
   auto get_matmul_nodedef = [](DataType dtype, bool transpose_a,
                                bool transpose_b) -> NodeDef {
@@ -2577,64 +2646,32 @@ TEST_F(OpConverterTest, ConvertMatMul) {
     return matmul.operation.node()->def();
   };
 
-  // Additional test cases specific to MatMul
-  {
-    // Can only transpose A if it is 2D in TRT
-    Reset();
-    NodeDef node_def = get_matmul_nodedef(DT_FLOAT, true, false);
-    AddTestTensor("input", {2}, /*batch_size=*/1);
-    AddTestWeights<float>("weights", {2, 2}, {0, 1, 2, 3});
-    RunValidationAndConversion(
-        node_def, error::INVALID_ARGUMENT,
-        "Cannot transpose first input if it is a tensor with fewer than 2 "
-        "non-batch dimensions.");
-  }
-  {
-    // B must always have 2 non-batch dimensions
-    Reset();
-    NodeDef node_def = get_matmul_nodedef(DT_FLOAT, false, false);
-    AddTestTensor("input", {2}, /*batch_size=*/1);
-    AddTestTensor("weights", {2}, /*batch_size=*/1);
-    RunValidationAndConversion(
-        node_def, error::INVALID_ARGUMENT,
-        "Second input must either be a constant, or contain at least 2 "
-        "non-batch dimensions.");
-  }
-  {
-    // We can never transpose weights that are not 2D.
-    Reset();
-    NodeDef node_def = get_matmul_nodedef(DT_FLOAT, true, false);
-    AddTestWeights<float>("input", {1, 1, 2}, {0, 1});
-    AddTestTensor("weights", {2, 2}, /*batch_size=*/1);
-    RunValidationAndConversion(
-        node_def, error::INVALID_ARGUMENT,
-        "Cannot currently transpose constant input if it is not 2 dimensional");
-  }
-  {
-    // Make sure that INT8 mode uses IFullyConnectedLayer when possible.
-    Reset(TrtPrecisionMode::INT8);
-    NodeDef node_def = get_matmul_nodedef(DT_FLOAT, false, false);
-    AddTestTensor("input", {2, 1, 1});
-    AddTestWeights<float>("weights", {2, 2}, {0, 1, 2, 3});
-    RunValidationAndConversion(node_def);
-    CheckAddedLayers<nvinfer1::IMatrixMultiplyLayer>(this, false);
-    CheckAddedLayers<nvinfer1::IFullyConnectedLayer>(this, true);
-  }
-  {
-    // Make sure that INT8 mode doesn't try to use IFullyConnectedLayer when not
-    // compatible. In this case we can't use FC because weights is a tensor.
-    Reset(TrtPrecisionMode::INT8);
-    NodeDef node_def = get_matmul_nodedef(DT_FLOAT, false, false);
-    AddTestTensor("input", {2, 1, 1});
-    AddTestTensor("weights", {2, 2});
-    RunValidationAndConversion(node_def);
-    CheckAddedLayers<nvinfer1::IMatrixMultiplyLayer>(this, true);
-    CheckAddedLayers<nvinfer1::IFullyConnectedLayer>(this, false);
-  }
-  TestMatMulHelper(this, get_matmul_nodedef, "MatMul");
+  // {
+  //   // Make sure that INT8 mode uses IFullyConnectedLayer when possible.
+  //   Reset(TrtPrecisionMode::INT8);
+  //   NodeDef node_def = get_matmul_nodedef(tf_type_, false, false);
+  //   AddTestTensor("input", {1, 1, 1, 2});
+  //   AddTestWeights("weights", {1, 2, 2}, {0, 1, 2, 3}, tf_type_);
+  //   RunValidationAndConversion(node_def);
+  //   bool can_use_fc = trt_mode != TrtTestMode::kDynamicShape;
+  //   CheckAddedLayers<nvinfer1::IMatrixMultiplyLayer>(this, !can_use_fc);
+  //   CheckAddedLayers<nvinfer1::IFullyConnectedLayer>(this, can_use_fc);
+  // }
+  // {
+  //   // Make sure that INT8 mode doesn't try to use IFullyConnectedLayer
+  //   when not
+  //   // compatible. In this case we can't use FC because weights is a
+  //   tensor. Reset(TrtPrecisionMode::INT8); NodeDef node_def =
+  //   get_matmul_nodedef(DT_FLOAT, false, false); AddTestTensor("input", {1,
+  //   1, 1, 2}); AddTestTensor("weights", {1, 1, 2, 2});
+  //   RunValidationAndConversion(node_def);
+  //   CheckAddedLayers<nvinfer1::IMatrixMultiplyLayer>(this, true);
+  //   CheckAddedLayers<nvinfer1::IFullyConnectedLayer>(this, false);
+  // }
+  // TestMatMulHelper(this, get_matmul_nodedef, "MatMul");
 }
 
-TEST_F(OpConverterTest, ConvertBatchMatMul) {
+TEST_P(OpConverter_FP32_Test, ConvertBatchMatMul) {
   // Get the NodeDef for BatchMatMul.
   auto get_batch_matmul_nodedef = [](DataType dtype, bool transpose_a,
                                      bool transpose_b) -> NodeDef {
@@ -2648,59 +2685,28 @@ TEST_F(OpConverterTest, ConvertBatchMatMul) {
     return matmul.operation.node()->def();
   };
 
-  {
-    // Can't broadcast two tensor inputs of different rank.
-    Reset();
-    NodeDef node_def = get_batch_matmul_nodedef(DT_FLOAT, false, false);
-    AddTestTensor("input", {1, 2, 2}, /*batch_size=*/2);
-    AddTestTensor("weights", {2}, /*batch_size=*/2);
-    RunValidationAndConversion(
-        node_def, error::UNIMPLEMENTED,
-        "Inputs must have the same rank if they are both tensors.");
-  }
-  {
-    // Make sure that INT8 mode doesn't try to use IFullyConnectedLayer when not
-    // compatible. In this case we can't use FC because transpose_a is true.
-    Reset(TrtPrecisionMode::INT8);
-    NodeDef node_def = get_batch_matmul_nodedef(DT_FLOAT, true, false);
-    AddTestTensor("input", {1, 2, 2});
-    AddTestWeights<float>("weights", {2, 2}, {0, 1, 2, 3});
-    RunValidationAndConversion(node_def);
-    CheckAddedLayers<nvinfer1::IMatrixMultiplyLayer>(this, true);
-    CheckAddedLayers<nvinfer1::IFullyConnectedLayer>(this, false);
-  }
-
-  for (bool transpose_a : {false, true}) {
-    for (bool transpose_b : {false, true}) {
-      Reset();
-      NodeDef node_def =
-          get_batch_matmul_nodedef(DT_FLOAT, transpose_a, transpose_b);
-      AddTestTensor("input", {2, 2}, /*batch_size=*/1);
-      AddTestWeights<float>("weights", {1, 2, 2}, {1, 2, 3, 4});
-
-      RunValidationAndConversion(node_def);
-      TRT_TensorOrWeights output;
-      TF_EXPECT_OK(GetTensorOrWeights("my_matmul", &output));
-      ASSERT_TRUE(output.is_tensor());
-      ExpectTrtDimsEqualsArray({2, 2}, output.tensor()->getDimensions());
-      const DataVec input_data{{"input", AsTensor<float>({0, 1, 2, 3})}};
-      DataVec output_data{{"my_matmul", ConstructTensor<float>(4)}};
-      TF_EXPECT_OK(BuildAndRun(input_data, &output_data));
-      if (!transpose_a && !transpose_b) {
-        EXPECT_THAT(GetSpanForData<float>(output_data[0]),
-                    ElementsAre(3, 4, 11, 16));
-      } else if (transpose_a && transpose_b) {
-        EXPECT_THAT(GetSpanForData<float>(output_data[0]),
-                    ElementsAre(4, 8, 7, 15));
-      } else if (transpose_a) {
-        EXPECT_THAT(GetSpanForData<float>(output_data[0]),
-                    ElementsAre(6, 8, 10, 14));
-      } else if (transpose_b) {
-        EXPECT_THAT(GetSpanForData<float>(output_data[0]),
-                    ElementsAre(2, 4, 8, 18));
-      }
-    }
-  }
+  // {
+  //   // Can't broadcast two tensor inputs of different rank.
+  //   Reset();
+  //   NodeDef node_def = get_batch_matmul_nodedef(DT_FLOAT, false, false);
+  //   AddTestTensor("input", {1, 2, 2}, /*batch_size=*/2);
+  //   AddTestTensor("weights", {2}, /*batch_size=*/2);
+  //   RunValidationAndConversion(
+  //       node_def, error::UNIMPLEMENTED,
+  //       "Inputs must have the same rank if they are both tensors.");
+  // }
+  // {
+  //   // Make sure that INT8 mode doesn't try to use IFullyConnectedLayer
+  //   when not
+  //       // compatible. In this case we can't use FC because transpose_a is
+  //       true.Reset(TrtPrecisionMode::INT8);
+  //   NodeDef node_def = get_batch_matmul_nodedef(DT_FLOAT, true, false);
+  //   AddTestTensor("input", {1, 2, 2});
+  //   AddTestWeights<float>("weights", {2, 2}, {0, 1, 2, 3});
+  //   RunValidationAndConversion(node_def);
+  //   CheckAddedLayers<nvinfer1::IMatrixMultiplyLayer>(this, true);
+  //   CheckAddedLayers<nvinfer1::IFullyConnectedLayer>(this, false);
+  // }
 
   TestMatMulHelper(this, get_batch_matmul_nodedef, "BatchMatMul");
 }
@@ -3060,10 +3066,10 @@ TEST_F(OpConverterTest, ConvertQuantize) {
     AddTestTensor("input", {1, 2, 3});
     AddTestTensor("weights_min", {1});
     AddTestTensor("weights_max", {1});
-    RunValidationAndConversion(
-        node_def, error::UNIMPLEMENTED,
-        "The input \"input_min\" for QuantizeAndDequantizeV2 must be a constant"
-        ", at my_quantize");
+    RunValidationAndConversion(node_def, error::UNIMPLEMENTED,
+                               "The input \"input_min\" for "
+                               "QuantizeAndDequantizeV2 must be a constant"
+                               ", at my_quantize");
   }
   {
     // QuantizeAndDequantizeV3 ranges set via inputs, ok.
@@ -4394,9 +4400,9 @@ TEST_P(OpConverter_FP32_Test, ConvertConv2D) {
         get_conv2d_nodedef({1, 1, 1, 1}, "SAME", "NCHW", {1, 1, 1});
     AddTestTensor("input", {1, 1, 2, 3});
     AddTestWeights<float>("weights", {3, 3, 1, 1}, {1, 2, 3, 4, 5, 6, 7, 8, 9});
-    RunValidationAndConversion(
-        node_def, error::INVALID_ARGUMENT,
-        "Convolution dilations field must specify 4 dimensions, at my_conv2d");
+    RunValidationAndConversion(node_def, error::INVALID_ARGUMENT,
+                               "Convolution dilations field must specify 4 "
+                               "dimensions, at my_conv2d");
   }
   {
     // Dilation value is not 1 for channel, should fail.
@@ -4762,9 +4768,9 @@ TEST_F(OpConverterTest, ConvertConv3D) {
     AddTestWeights<float>(
         "weights", {3, 3, 1, 1, 1},
         {1, 2, 3, 4, 5, 6, 7, 8, 9});  // Dimensions, then values
-    RunValidationAndConversion(
-        node_def, error::INVALID_ARGUMENT,
-        "Convolution dilations field must specify 5 dimensions, at my_conv3d");
+    RunValidationAndConversion(node_def, error::INVALID_ARGUMENT,
+                               "Convolution dilations field must specify 5 "
+                               "dimensions, at my_conv3d");
   }
   {
     // Dilation value is not 1 for channel, should fail.
@@ -5096,14 +5102,14 @@ TEST_P(OpConverter_FP32_Test, ConvertPool) {
     string padding;
     string data_format;
     std::vector<int> expected_output_dims;
-    // The expected outputs for the following operations: MaxPool2D, AvgPool2D,
-    // MaxPool3D, AvgPool3D
+    // The expected outputs for the following operations: MaxPool2D,
+    // AvgPool2D, MaxPool3D, AvgPool3D
     std::vector<std::vector<float>> expected_outputs;
   };
 
-  // We use common_input as the input to test both 2D and 3D pooling operations,
-  // to simplify TestParams. For 2D operations, only the first 1/3 of the values
-  // are used.
+  // We use common_input as the input to test both 2D and 3D pooling
+  // operations, to simplify TestParams. For 2D operations, only the first 1/3
+  // of the values are used.
   const std::vector<float> common_input{-4, 2,  15, 3, 6,   -3, 22, 1,   88,
                                         56, 36, 1,  1, 105, 1,  16, -28, 1,
                                         42, 9,  3,  1, 7,   1,  11, 61,  5};
@@ -5304,7 +5310,8 @@ TEST_P(OpConverter_FP32_FP16_INT32_Test, ConvertGather) {
                               "Indices must have a batch size of 1 when params"
                               " is a tensor."}
                      : Status::OK()},
-      // Axis is not zero when params is a weight, should fail in implicit batch
+      // Axis is not zero when params is a weight, should fail in implicit
+      // batch
       // mode.
       TestParams{/*params_shape=*/{2, 1, 3},
                  /*indices_shape=*/{2},
@@ -5357,7 +5364,8 @@ TEST_P(OpConverter_FP32_FP16_INT32_Test, ConvertGather) {
           /*expected_output=*/{4, 5, 6},
           /*params_is_tensor=*/true,
       },
-      // Indices with rank>1, and output rank is rank(params) + rank(indices) -
+      // Indices with rank>1, and output rank is rank(params) + rank(indices)
+      // -
       // 1
       TestParams{
           /*params_shape=*/{1, 1, 2, 3},
@@ -5674,8 +5682,8 @@ TEST_P(OpConverter_FP32_Test, ConvertUnary) {
     // TODO(bixia): we assume this test is only instantiated for DT_FLOAT for
     // now. Need to find a better way to express input and output types.
     //
-    // TODO(tfeher): improve tests by defining an expected output data type and
-    // check that. Currently only the shape and values of the output are
+    // TODO(tfeher): improve tests by defining an expected output data type
+    // and check that. Currently only the shape and values of the output are
     // checked.
     DataType input_tf_type = op_name == "Cast" ? DT_HALF : tf_type_;
 
@@ -6165,9 +6173,9 @@ TEST_F(OpConverterTest, ConvertUnpack) {
     Reset();
     NodeDef node_def = get_unpack_nodedef(DT_FLOAT, /*num=*/5, /*axis=*/2);
     AddTestTensor("value", {1, 6});
-    RunValidationAndConversion(
-        node_def, error::INVALID_ARGUMENT,
-        "Dimension 2 has size 6 which is not equal to num of 5, at my_unpack");
+    RunValidationAndConversion(node_def, error::INVALID_ARGUMENT,
+                               "Dimension 2 has size 6 which is not equal to "
+                               "num of 5, at my_unpack");
   }
   {
     // Output would be TF scalar, should fail.
@@ -6950,7 +6958,8 @@ TEST_P(OpConverter_FP32_FP16_Test, ConvertSquaredDifference) {
            ? Status::OK()
            : errors::InvalidArgument("Infeasible broadcast scheme"),
        errors::Internal(
-           "Binding index out of range. This can happen if profile is not set, "
+           "Binding index out of range. This can happen if profile is not "
+           "set, "
            "or the network is invalid for the current profile.")},
       {
           /*dims_x=*/{1, 1, 2, 3},
