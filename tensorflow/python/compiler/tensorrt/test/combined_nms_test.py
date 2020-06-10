@@ -24,10 +24,11 @@ from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import image_ops_impl
+from tensorflow.python.ops import stateless_random_ops
 from tensorflow.python.platform import test
 
 
-class CombinedNmsTest(trt_test.TfTrtIntegrationTestBase):
+class CombinedNmsTest_1(trt_test.TfTrtIntegrationTestBase):
   """Test for CombinedNMS op in TF-TRT."""
 
   def GraphFn(self, boxes, scores):
@@ -78,6 +79,101 @@ class CombinedNmsTest(trt_test.TfTrtIntegrationTestBase):
                                 nmsed_boxes_shape, nmsed_scores_shape,
                                 nmsed_classes_shape, valid_detections_shape
                             ])
+
+  def ExpectedEnginesToBuild(self, run_params):
+    """Return the expected engines to build."""
+    return {
+        'TRTEngineOp_0': [
+            'combined_nms/CombinedNonMaxSuppression',
+            'max_output_size_per_class', 'max_total_size', 'iou_threshold',
+            'score_threshold'
+        ]
+    }
+
+  def ShouldRunTest(self, run_params):
+    # There is no CombinedNonMaxSuppression op for GPU at the moment, so
+    # calibration will fail.
+    # TODO(laigd): fix this.
+    # Only run for TRT 5.1 and above.
+    ver = get_linked_tensorrt_version()
+    return (ver[0] > 5 or
+            (ver[0] == 5 and ver[1] >= 1)) and not trt_test.IsQuantizationMode(
+                run_params.precision_mode), 'test >=TRT5.1 and non-INT8'
+
+
+class CombinedNmsTest_2(trt_test.TfTrtIntegrationTestBase):
+  """Test for CombinedNMS op in TF-TRT."""
+
+  def GraphFn(self, pre_nms_boxes, pre_nms_scores,
+              max_boxes_to_draw, max_detetion_points):
+
+    iou_threshold = 0.1
+    score_threshold = 0.001
+
+    max_output_size_per_class_tensor = constant_op.constant(
+        max_detetion_points,
+        dtype=dtypes.int32,
+        name='max_output_size_per_class')
+
+    max_total_size_tensor = constant_op.constant(
+        max_boxes_to_draw, dtype=dtypes.int32, name='max_total_size')
+
+    iou_threshold_tensor = constant_op.constant(
+        iou_threshold, dtype=dtypes.float32, name='iou_threshold')
+
+    score_threshold_tensor = constant_op.constant(
+        score_threshold, dtype=dtypes.float32, name='score_threshold')
+
+    nms_output = image_ops_impl.combined_non_max_suppression(
+      pre_nms_boxes,
+      pre_nms_scores,
+      max_output_size_per_class=max_output_size_per_class_tensor,
+      max_total_size=max_total_size_tensor,
+      iou_threshold=iou_threshold_tensor,
+      score_threshold=score_threshold_tensor,
+      pad_per_class=False,
+      name='combined_nms'
+    )
+
+    return [
+        array_ops.identity(output, name=('output_%d' % i))
+        for i, output in enumerate(nms_output)
+    ]
+
+  def GetParams(self):
+
+    # Parameters
+    batch_size = 1
+    max_detetion_points = 2048
+    num_classes = 90
+    max_boxes_to_draw = 30
+
+    # Inputs
+    pre_nms_boxes_shape = [batch_size, max_detetion_points, 1, 4]
+    pre_nms_scores_shape = [batch_size, max_detetion_points, num_classes]
+
+    # Outputs
+    nmsed_boxes_shape = [batch_size, max_boxes_to_draw, 4]
+    nmsed_scores_shape = [batch_size, max_boxes_to_draw]
+    nmsed_classes_shape = [batch_size, max_boxes_to_draw]
+    valid_detections_shape = [batch_size]
+
+    return self.BuildParams(
+        lambda x, y: self.GraphFn(
+            x,
+            y,
+            max_boxes_to_draw=max_boxes_to_draw,
+            max_detetion_points=max_detetion_points
+        ),
+        dtypes.float32,
+        [pre_nms_boxes_shape, pre_nms_scores_shape],
+        [
+            nmsed_boxes_shape,
+            nmsed_scores_shape,
+            nmsed_classes_shape,
+            valid_detections_shape
+        ]
+    )
 
   def ExpectedEnginesToBuild(self, run_params):
     """Return the expected engines to build."""
