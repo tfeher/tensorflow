@@ -27,7 +27,7 @@ from tensorflow.python.ops import image_ops_impl
 from tensorflow.python.platform import test
 
 
-class CombinedNmsTest_1(trt_test.TfTrtIntegrationTestBase):
+class CombinedNmsSmallTest(trt_test.TfTrtIntegrationTestBase):
   """Test for CombinedNMS op in TF-TRT."""
 
   def GraphFn(self, boxes, scores):
@@ -100,7 +100,7 @@ class CombinedNmsTest_1(trt_test.TfTrtIntegrationTestBase):
                 run_params.precision_mode), 'test >=TRT5.1 and non-INT8'
 
 
-class CombinedNmsTest_2(trt_test.TfTrtIntegrationTestBase):
+class CombinedNmsLargeTest(trt_test.TfTrtIntegrationTestBase):
   """Test for CombinedNMS op in TF-TRT."""
 
   def GraphFn(self, pre_nms_boxes, pre_nms_scores,
@@ -126,16 +126,15 @@ class CombinedNmsTest_2(trt_test.TfTrtIntegrationTestBase):
     pre_nms_boxes = array_ops.identity(pre_nms_boxes, name='pre_nms_boxes')
     pre_nms_scores = array_ops.identity(pre_nms_scores, name='pre_nms_scores')
 
-    nms_output = image_ops_impl.combined_non_max_suppression(
-      pre_nms_boxes,
-      pre_nms_scores,
-      max_output_size_per_class=max_output_size_per_class_tensor,
-      max_total_size=max_total_size_tensor,
-      iou_threshold=iou_threshold_tensor,
-      score_threshold=score_threshold_tensor,
-      pad_per_class=False,
-      name='combined_nms'
-    )
+    nms_output = image_ops_impl.combined_non_max_suppressiosn(
+        pre_nms_boxes,
+        pre_nms_scores,
+        max_output_size_per_class=max_output_size_per_class_tensor,
+        max_total_size=max_total_size_tensor,
+        iou_threshold=iou_threshold_tensor,
+        score_threshold=score_threshold_tensor,
+        pad_per_class=False,
+        name='combined_nms')
 
     return [
         array_ops.identity(output, name=('output_%d' % i))
