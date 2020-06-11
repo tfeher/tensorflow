@@ -24,7 +24,6 @@ from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import image_ops_impl
-from tensorflow.python.ops import stateless_random_ops
 from tensorflow.python.platform import test
 
 
@@ -123,6 +122,9 @@ class CombinedNmsTest_2(trt_test.TfTrtIntegrationTestBase):
 
     score_threshold_tensor = constant_op.constant(
         score_threshold, dtype=dtypes.float32, name='score_threshold')
+
+    pre_nms_boxes = array_ops.identity(pre_nms_boxes, name='pre_nms_boxes')
+    pre_nms_scores = array_ops.identity(pre_nms_scores, name='pre_nms_scores')
 
     nms_output = image_ops_impl.combined_non_max_suppression(
       pre_nms_boxes,
