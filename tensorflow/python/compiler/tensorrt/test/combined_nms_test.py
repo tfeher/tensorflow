@@ -126,7 +126,7 @@ class CombinedNmsLargeTest(trt_test.TfTrtIntegrationTestBase):
     pre_nms_boxes = array_ops.identity(pre_nms_boxes, name='pre_nms_boxes')
     pre_nms_scores = array_ops.identity(pre_nms_scores, name='pre_nms_scores')
 
-    nms_output = image_ops_impl.combined_non_max_suppressiosn(
+    nms_output = image_ops_impl.combined_non_max_suppression(
         pre_nms_boxes,
         pre_nms_scores,
         max_output_size_per_class=max_output_size_per_class_tensor,
