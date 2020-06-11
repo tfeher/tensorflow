@@ -27,7 +27,7 @@ from tensorflow.python.ops import image_ops_impl
 from tensorflow.python.platform import test
 
 
-class CombinedNmsSmallTest(trt_test.TfTrtIntegrationTestBase):
+class CombinedNmsTest(trt_test.TfTrtIntegrationTestBase):
   """Test for CombinedNMS op in TF-TRT."""
 
   def GraphFn(self, boxes, scores):
@@ -100,8 +100,8 @@ class CombinedNmsSmallTest(trt_test.TfTrtIntegrationTestBase):
                 run_params.precision_mode), 'test >=TRT5.1 and non-INT8'
 
 
-class CombinedNmsLargeTest(trt_test.TfTrtIntegrationTestBase):
-  """Test for CombinedNMS op in TF-TRT."""
+class CombinedNmsTestTopK(trt_test.TfTrtIntegrationTestBase):
+  """Test for CombinedNMS TopK op in TF-TRT."""
 
   def GraphFn(self, pre_nms_boxes, pre_nms_scores,
               max_boxes_to_draw, max_detetion_points):
