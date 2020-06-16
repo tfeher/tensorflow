@@ -5733,13 +5733,20 @@ Status ConvertCombinedNMS(OpConverterParams* params) {
 
   if (params->validation_only) return Status::OK();
 
-  // TF op CombinedNonMaxSuppression doesn't have the option of
-  // not normalizing coordinates.
+  // TRT op is_normalized=False treats input corrdinates as pixels and
+  // calculates width/height as (max - min + 1).
+  //
+  // TF op CombinedNonMaxSuppression doesn't care about the normalization and
+  // calculates width/height  as (max-min).
+  //
+  // We set is_normalized = true to be consistent with TF IOU calculaton.
   const bool is_normalized = true;
+
   // Set plugin fields and the field collection
   TFAttrs attrs(node_def);
   bool share_location = (boxes_dims.d[1] == 1);
   const bool pad_per_class = attrs.get<bool>("pad_per_class");
+  const bool clip_boxes = attrs.get<bool>("clip_boxes");
   const int top_k = boxes_dims.d[0];
   int keep_top_k = 0;
   if (pad_per_class) {
@@ -5749,7 +5756,7 @@ Status ConvertCombinedNMS(OpConverterParams* params) {
   }
   float score_thresh = *(static_cast<float*>(score_threshold.GetValues()));
   const int background_id = -1;
-  nvinfer1::PluginField fields[8] = {
+  nvinfer1::PluginField fields[9] = {
       nvinfer1::PluginField{"shareLocation", &share_location,
                             nvinfer1::PluginFieldType::kINT32, 1},
       nvinfer1::PluginField{"backgroundLabelId", &background_id,
@@ -5766,8 +5773,9 @@ Status ConvertCombinedNMS(OpConverterParams* params) {
                             nvinfer1::PluginFieldType::kFLOAT32, 1},
       nvinfer1::PluginField{"isNormalized", &is_normalized,
                             nvinfer1::PluginFieldType::kINT32, 1},
-  };
-  nvinfer1::PluginFieldCollection fc{8, fields};
+      nvinfer1::PluginField{"clipBoxes", &clip_boxes,
+                            nvinfer1::PluginFieldType::kINT32, 1}};
+  nvinfer1::PluginFieldCollection fc{9, fields};
 
   // Get plugin creator
   auto creator =
