@@ -79,6 +79,10 @@ using absl::StrCat;
    (NV_TENSORRT_MAJOR == major && NV_TENSORRT_MINOR == minor && \
     NV_TENSORRT_PATCH == patch && NV_TENSORRT_BUILD >= build))
 
+Status ConcatenateShape(nvinfer1::INetworkDefinition* network, string node_name,
+                        const std::vector<nvinfer1::ITensor*> size_tensors,
+                        nvinfer1::ITensor** new_shape);
+
 // This utility template converts an arithmetic type to a string. This function
 // is necessary to allow the following function to behave recursively:
 // `string DebugString(const std::vector<CType>&)`.

@@ -56,6 +56,20 @@ Status TrtPrecisionModeFromName(const string& name, TrtPrecisionMode* mode) {
 
 #if GOOGLE_CUDA && GOOGLE_TENSORRT
 
+Status ConcatenateShape(nvinfer1::INetworkDefinition* network, string node_name,
+                        const std::vector<nvinfer1::ITensor*> size_tensors,
+                        nvinfer1::ITensor** new_shape) {
+  nvinfer1::IConcatenationLayer* layer = network->addConcatenation(
+      const_cast<nvinfer1::ITensor* const*>(size_tensors.data()),
+      size_tensors.size());
+  if (layer == nullptr) {
+    errors::Internal("TFTRT failed to add TRT layer, at: ", node_name);
+  }
+  layer->setAxis(0);
+  *new_shape = layer->getOutput(0);
+  return Status::OK();
+}
+
 string DebugString(const nvinfer1::DimensionType type) {
   switch (type) {
     case nvinfer1::DimensionType::kSPATIAL:
