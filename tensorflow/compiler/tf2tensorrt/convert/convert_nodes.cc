@@ -5550,7 +5550,7 @@ Status ConvertArgMinMax(OpConverterParams* params) {
   int trt_axis;
   nvinfer1::Dims dims = inputs.at(0).GetTrtDims();
   TF_RETURN_IF_ERROR(ConvertAxis(tf_axis, dims.nbDims, node_def.name(),
-                                 /*use_implicit_batch=*/true, &trt_axis));
+                                 params->use_implicit_batch, &trt_axis));
   nvinfer1::TopKOperation topk_op;
   if (node_def.op() == "ArgMin") {
     topk_op = nvinfer1::TopKOperation::kMIN;
