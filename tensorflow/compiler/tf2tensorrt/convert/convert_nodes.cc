@@ -5368,9 +5368,10 @@ Status ConvertMatMulHelper(OpConverterParams* params,
 
   const auto get_matrix_op = [](nvinfer1::ITensor* in,
                                 bool transpose) -> nvinfer1::MatrixOperation {
-    return (in->getDimensions().nbDims < 2) ? nvinfer1::MatrixOperation::kVECTOR
-           : (transpose) ? nvinfer1::MatrixOperation::kTRANSPOSE
-                         : nvinfer1::MatrixOperation::kNONE;
+    return (in->getDimensions().nbDims < 2)
+               ? nvinfer1::MatrixOperation::kVECTOR
+               : (transpose) ? nvinfer1::MatrixOperation::kTRANSPOSE
+                             : nvinfer1::MatrixOperation::kNONE;
   };
 
   // If the MatMul operand is a constant, applies transposes at conversion-time
@@ -5570,16 +5571,23 @@ Status ConvertArgMinMax(OpConverterParams* params) {
   nvinfer1::ITensor* output_indices_tensor = layer->getOutput(1);
 
   // Squeeze on axis.
-  std::vector<int> size(dims.d, dims.d + dims.nbDims);
-  size.erase(size.begin() + trt_axis);
-  nvinfer1::Dims new_dims;
-  TF_RETURN_IF_ERROR(TensorShapeArrayToTrtDims(size, &new_dims));
+  std::vector<int> input_dims(dims.d, dims.d + dims.nbDims);
+  input_dims[trt_axis] = 0;
   nvinfer1::ITensor* output_tensor = nullptr;
-  TF_RETURN_IF_ERROR(PrepareTensorForShape(
-      params->converter, TRT_TensorOrWeights(output_indices_tensor), new_dims,
-      /*validation_only=*/false, &output_tensor, node_def));
-
+  TF_RETURN_IF_ERROR(params->converter->SqueezeTensor(
+      output_indices_tensor, &input_dims, params, &output_tensor));
   params->outputs->push_back(TRT_TensorOrWeights(output_tensor));
+
+  // size.erase(size.begin() + trt_axis);
+  // nvinfer1::Dims new_dims;
+  // TF_RETURN_IF_ERROR(TensorShapeArrayToTrtDims(size, &new_dims));
+  // nvinfer1::ITensor* output_tensor = nullptr;
+  // TF_RETURN_IF_ERROR(PrepareTensorForShape(
+  //     params->converter, TRT_TensorOrWeights(output_indices_tensor),
+  //     new_dims,
+  //     /*validation_only=*/false, &output_tensor, node_def));
+  //
+  // params->outputs->push_back(TRT_TensorOrWeights(output_tensor));
   return Status::OK();
 }
 

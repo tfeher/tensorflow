@@ -32,8 +32,6 @@ limitations under the License.
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
-#include "third_party/gpus/cuda/include/cuda.h"
-#include "third_party/gpus/cuda/include/cuda_runtime_api.h"
 #include "tensorflow/cc/framework/ops.h"
 #include "tensorflow/cc/framework/scope.h"
 #include "tensorflow/cc/ops/nn_ops_internal.h"
@@ -58,6 +56,8 @@ limitations under the License.
 #include "tensorflow/core/platform/test.h"
 #include "tensorflow/core/protobuf/config.pb.h"  // NOLINT
 #include "tensorflow/core/public/session.h"
+#include "third_party/gpus/cuda/include/cuda.h"
+#include "third_party/gpus/cuda/include/cuda_runtime_api.h"
 #include "third_party/tensorrt/NvInfer.h"
 
 namespace tensorflow {
@@ -6225,12 +6225,12 @@ struct ArgMinMaxTestParams {
   std::vector<int> expected_output_dims;
   std::vector<int> expected_argmax_output;
   std::vector<int> expected_argmin_output;
+  Status status;
 };
 
 template <typename OpType>
 void TestConvertArgMinMax(ParameterizedOpConverterTestBase* test,
-                          DataType _tf_type,
-                          ArgMinMaxTestParams &p) {
+                          DataType _tf_type, ArgMinMaxTestParams& p) {
   test->Reset();
 
   NodeDef node_def = GetArgMinMaxNodeDef<OpType>(_tf_type,
@@ -6241,8 +6241,7 @@ void TestConvertArgMinMax(ParameterizedOpConverterTestBase* test,
     expected_out = p.expected_argmax_output;
   } else if (node_def.op() == "ArgMin") {
     expected_out = p.expected_argmin_output;
-  }
-  else {
+  } else {
     ASSERT_TRUE(false);
   }
 
@@ -6250,17 +6249,18 @@ void TestConvertArgMinMax(ParameterizedOpConverterTestBase* test,
   test->AddTestWeights("dimension", {1}, {p.axis}, DT_INT32);
 
   test->TestOpConverter("my_arg", node_def, p.expected_output_dims,
-                        /*expected_conversion_status=*/Status::OK(),
+                        /*expected_conversion_status=*/p.status,
                         /*expected_runtime_status=*/Status::OK(),
-                        /*matcher=*/ElementsAreArray(expected_out));
+                        /*matcher=*/ElementsAreArray(expected_out), {DT_INT32});
 }
 
 TEST_P(OpConverter_FP32_FP16_Test, ConvertArgMinMax) {
   {
     // Dimension is a tensor, should fail.
     Reset();
-    NodeDef node_def = GetArgMinMaxNodeDef<ops::ArgMax>(
-        tf_type_, /*output_dtype=*/DT_INT32);
+    NodeDef node_def =
+        GetArgMinMaxNodeDef<ops::ArgMax>(tf_type_,
+                                         /*output_dtype=*/DT_INT32);
     AddTestTensor("input", {1, 2, 3});
     AddTestTensor("dimension", {1});
     RunValidationAndConversion(
@@ -6270,58 +6270,60 @@ TEST_P(OpConverter_FP32_FP16_Test, ConvertArgMinMax) {
   {
     // Output type is INT64, should fail.
     Reset();
-    NodeDef node_def = GetArgMinMaxNodeDef<ops::ArgMax>(
-        tf_type_, /*output_dtype=*/DT_INT64);
+    NodeDef node_def =
+        GetArgMinMaxNodeDef<ops::ArgMax>(tf_type_,
+                                         /*output_dtype=*/DT_INT64);
     AddTestTensor("input", {1, 2, 3});
     AddTestWeights("dimension", {1}, {3}, DT_INT32);
     RunValidationAndConversion(node_def, error::UNIMPLEMENTED,
                                "Output type int64 is not supported, at my_arg");
   }
-  {
-    // Axis is batch dimension, should fail
-    Reset();
-    NodeDef node_def = GetArgMinMaxNodeDef<ops::ArgMax>(
-        tf_type_, /*output_dtype=*/DT_INT32);
-    AddTestTensor("input", {1, 2, 3});
-    AddTestWeights("dimension", {1}, {0}, DT_INT32);
-    RunValidationAndConversion(
-        node_def, error::UNIMPLEMENTED,
-        "TensorRT does not allow manipulation of the batch dimension, at "
-        "my_arg");
-  }
 
   const std::vector<float> common_input = InitTestVector<float>(6);
   std::vector<ArgMinMaxTestParams> params = {
+      {/*input_shape=*/{2, 3},
+       /*input_value=*/common_input,
+       /*axis=*/0,
+       /*expected_output_dims=*/{3},
+       /*expected_argmax_output=*/{1, 1, 1},
+       /*expected_argmin_output=*/{0, 0, 0},
+       trt_mode_ == TrtTestMode::kImplicitBatch
+           ? errors::Unimplemented("TensorRT does not allow manipulation of "
+                                   "the batch dimension, at my_arg")
+           : Status::OK()},
       {
-          /*input_shape=*/{2, 3},
+          /*input_shape=*/{1, 2, 3},
           /*input_value=*/common_input,
           /*axis=*/2,
-          /*expected_output_dims=*/{2},
+          /*expected_output_dims=*/{1, 2},
           /*expected_argmax_output=*/{2, 2},
           /*expected_argmin_output=*/{0, 0},
       },
       {
-          /*input_shape=*/{2, 3},
+          /*input_shape=*/{1, 2, 3},
           /*input_value=*/common_input,
           /*axis=*/-2,
-          /*expected_output_dims=*/{3},
+          /*expected_output_dims=*/{1, 3},
           /*expected_argmax_output=*/{1, 1, 1},
           /*expected_argmin_output=*/{0, 0, 0},
       },
       {
-          /*input_shape=*/{6},
+          /*input_shape=*/{1, 6},
           /*input_value=*/common_input,
           /*axis=*/1,
-          /*expected_output_dims=*/{},
+          /*expected_output_dims=*/
+          {
+              1,
+          },
           /*expected_argmax_output=*/{5},
           /*expected_argmin_output=*/{0},
       },
       {
-          /*input_shape=*/{10},
+          /*input_shape=*/{1, 10},
           /*input_value=*/
           {-5.0f, 3.0f, 5.0f, 1.0f, 6.0f, -9.0f, 7.0f, 1.0f, 0.0f, -1.0f},
           /*axis=*/-1,
-          /*expected_output_dims=*/{},
+          /*expected_output_dims=*/{1},
           /*expected_argmax_output=*/{6},
           /*expected_argmin_output=*/{5},
       },
